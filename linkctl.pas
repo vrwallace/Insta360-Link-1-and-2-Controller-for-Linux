@@ -61,11 +61,23 @@ program linkctl;
 uses
   SysUtils, Classes, uv4l2, uinsta360link;
 
+type
+  TLogHelper = class
+    procedure LogHandler(Sender: TObject; const Msg: string);
+  end;
+
 var
   Cam: TInsta360Link;
   DevicePath: string;
   XUnitID: Integer;
   Verbose: Boolean;
+  LogHelper: TLogHelper;
+
+procedure TLogHelper.LogHandler(Sender: TObject; const Msg: string);
+begin
+  if Verbose then
+    WriteLn('[LOG] ', Msg);
+end;
 
 procedure ShowHelp;
 begin
@@ -109,12 +121,6 @@ begin
   WriteLn('  info                Show camera info + all controls');
   WriteLn('  preset save|recall <0-5>');
   WriteLn('  xu <selector> <hex_bytes...>   Raw XU command');
-end;
-
-procedure LogHandler(Sender: TObject; const Msg: string);
-begin
-  if Verbose then
-    WriteLn('[LOG] ', Msg);
 end;
 
 procedure DoList;
@@ -167,7 +173,8 @@ begin
     DevicePath := AutoDetectDevice;
 
   Cam := TInsta360Link.Create;
-  Cam.OnLog := @LogHandler;
+  LogHelper := TLogHelper.Create;
+  Cam.OnLog := @LogHelper.LogHandler;
 
   if XUnitID >= 0 then
     Cam.XU_UnitID := Byte(XUnitID);
@@ -221,6 +228,8 @@ var
   i, argIdx: Integer;
   cmd: string;
   ok: Boolean;
+  sel: Byte;
+  data: array of Byte;
 begin
   DevicePath := '';
   XUnitID := -1;
@@ -369,8 +378,6 @@ begin
     begin
       if argIdx < ParamCount then
       begin
-        var sel: Byte;
-        var data: array of Byte;
         sel := StrToIntDef(ParamStr(argIdx), 0);
         Inc(argIdx);
         SetLength(data, ParamCount - argIdx + 1);
@@ -402,5 +409,6 @@ begin
   finally
     Cam.Close;
     Cam.Free;
+    LogHelper.Free;
   end;
 end.
