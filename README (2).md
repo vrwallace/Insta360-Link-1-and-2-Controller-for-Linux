@@ -4,43 +4,22 @@ A Free Pascal / Lazarus application to control the **Insta360 Link** and **Insta
 
 ## Supported Cameras
 
-| Camera | VID:PID | Modes | Framing | PTZ | Image | Zoom |
-|--------|---------|-------|---------|-----|-------|------|
-| Insta360 Link | 2E1A:4C01 | ✅ | ✅ | ✅ V4L2 | ✅ | ✅ |
-| Insta360 Link 2 | 2E1A:4C04 | ✅ | ✅ | ✅ Combined | ✅ | ✅ |
+| Camera | VID:PID | Modes | PTZ | Image | Zoom |
+|--------|---------|-------|-----|-------|------|
+| Insta360 Link | 2E1A:4C01 | ✅ | ✅ V4L2 | ✅ | ✅ |
+| Insta360 Link 2 | 2E1A:4C04 | ✅ | ❌ (needs XU mapping) | ✅ | ✅ |
 
 Both cameras share identical XU GUIDs and mode control protocol.
 
 ## Features
 
-### Live Preview (GUI)
-- **In-app video preview** — see the camera feed while you adjust controls, no
-  second app required. Starts automatically on connect (toggle with the
-  **Start/Stop Preview** button).
-- Streams from the camera over V4L2 memory-mapped buffers, preferring **MJPEG**
-  (decoded natively) and falling back to **YUYV**. The driver negotiates the
-  nearest supported size to the requested 1280×720; the active resolution and
-  pixel format are shown next to the preview.
-- Frames are polled on a timer (~25 fps) so the UI never blocks. If another
-  application is already streaming from the camera, preview won't start and the
-  log notes why — all other controls still work.
-
 ### Standard V4L2 Controls (work with any UVC webcam)
-- **Pan / Tilt / Zoom** — absolute and relative positioning, with
-  **press-and-hold** D-pad buttons for continuous motion (see below)
+- **Pan / Tilt / Zoom** — absolute and relative positioning
 - **Image adjustments** — brightness, contrast, saturation, sharpness, gain
 - **White balance** — auto or manual temperature (Kelvin)
 - **Exposure** — auto or manual absolute value
 - **Focus** — auto or manual absolute value
 - **Backlight compensation**
-
-### Press-and-Hold PTZ (GUI)
-The 8 directional D-pad buttons move the gimbal continuously **while held** and
-stop on release (rather than a single step per click). The camera moves once
-immediately on press, then repeats every ~150 ms. Movement speed per step is set
-by the **Pan** and **Tilt** spin-edits next to the D-pad — lower values give
-smooth, slow motion; higher values move faster. The center **⌂** button resets
-to home.
 
 ### Insta360 Link Proprietary Controls (via UVC Extension Unit)
 - **AI Tracking** — enable/disable AI person tracking
@@ -75,15 +54,14 @@ using our `xu_monitor` tool alongside the official Insta360 Link Controller.
 
 **Gimbal Reset** — XU Unit 9, Selector 14 (1-byte, write `$01`).
 
-**Not controllable via Linux UVC** (confirmed by testing):
-- Tracking target (single/group) — XU-10 Sel 1 byte[4] is read-only on Linux (works on Windows)
+**Not controllable via XU** (confirmed by monitoring):
 - HDR — processed in software by the Link Controller app
 - Gesture control — always enabled in camera firmware
 - Privacy mode — not found
 - Portrait/9:16 mode — not found in Link Controller
 
 ### Two Interfaces
-1. **GUI Application** (`insta360linkgui`) — full Lazarus GUI with live preview, sliders, press-and-hold PTZ, buttons, presets
+1. **GUI Application** (`insta360linkgui`) — full Lazarus GUI with sliders, buttons, presets
 2. **CLI Tool** (`linkctl`) — command-line tool for scripting and automation
 
 ## Project Structure
@@ -91,7 +69,6 @@ using our `xu_monitor` tool alongside the official Insta360 Link Controller.
 ```
 insta360link/
 ├── uv4l2.pas              V4L2 + UVC Extension Unit API bindings
-├── uvideocap.pas          V4L2 MMAP streaming capture for live preview (GUI only)
 ├── uinsta360link.pas       High-level Insta360 Link camera controller class
 ├── umainform.pas           Lazarus GUI form (code-created UI)
 ├── umainform.lfm           Lazarus form definition
@@ -164,15 +141,10 @@ sudo usermod -aG video $USER
 ./insta360linkgui
 ```
 
-1. Select your camera from the device dropdown (the last-used device is
-   re-selected automatically on launch)
-2. Click **Connect** — the live preview starts automatically
-3. Use the PTZ controls, mode buttons, and image sliders. **Hold** a D-pad
-   button to move the gimbal continuously; release to stop. Adjust the **Pan**
-   and **Tilt** step values to change movement speed.
-4. Toggle the feed with **Start/Stop Preview** (e.g. to free the camera for
-   another app)
-5. Save preset positions for quick recall
+1. Select your camera from the device dropdown
+2. Click **Connect**
+3. Use the PTZ controls, mode buttons, and image sliders
+4. Save preset positions for quick recall
 
 ### CLI Tool
 
@@ -193,15 +165,21 @@ sudo usermod -aG video $USER
 
 # AI Features
 ./linkctl tracking on
-./linkctl frame head
-./linkctl frame half
-./linkctl frame full
+./linkctl trackmode single
+./linkctl trackmode group
+./linkctl trackspeed 4
 
 # Camera Modes
 ./linkctl deskview on       # Overhead desk view
 ./linkctl whiteboard on     # Whiteboard mode
-./linkctl overhead on       # Overhead document view
+./linkctl portrait on       # Vertical 9:16 mode
 ./linkctl deskview off      # Back to normal
+
+# Other Features
+./linkctl gesture on
+./linkctl hdr on
+./linkctl privacy on        # Tilt camera down for privacy
+./linkctl noise focus       # Voice-isolating noise reduction
 
 # Image Controls
 ./linkctl brightness 150
@@ -218,7 +196,10 @@ sudo usermod -aG video $USER
 
 # Scripting example: presentation mode
 ./linkctl tracking on
-./linkctl frame half
+./linkctl trackmode single
+./linkctl trackspeed 3
+./linkctl hdr on
+./linkctl noise focus
 
 # Raw XU command (advanced/experimental)
 ./linkctl -v xu 3 01        # Send byte 0x01 to XU selector 3
@@ -241,14 +222,6 @@ The Insta360 Link is a standard **UVC (USB Video Class)** device on Linux. It ex
 1. **Standard V4L2 controls** — brightness, contrast, pan, tilt, zoom, focus, exposure, etc. These are accessed via the `VIDIOC_QUERYCTRL`, `VIDIOC_G_CTRL`, and `VIDIOC_S_CTRL` ioctls.
 
 2. **UVC Extension Unit (XU) controls** — proprietary controls for AI tracking, special modes, presets, etc. These are accessed via the `UVCIOC_CTRL_QUERY` ioctl with the Insta360-specific Extension Unit GUID and selector bytes.
-
-3. **Video stream** — the live preview (`uvideocap.pas`) streams from the same
-   device node using the standard V4L2 capture path: `VIDIOC_S_FMT` to negotiate
-   format/resolution, `VIDIOC_REQBUFS` + `mmap` for zero-copy buffers, and
-   `VIDIOC_QBUF`/`VIDIOC_DQBUF` around `VIDIOC_STREAMON`/`STREAMOFF`. The fd is
-   opened `O_NONBLOCK`, so dequeue returns `EAGAIN` when no frame is ready and
-   the GUI simply polls again on its next timer tick. MJPEG frames are decoded
-   with `TJPEGImage`; YUYV frames are converted to RGB in software.
 
 ### USB Identification
 
@@ -311,15 +284,6 @@ Or use the CLI tool:
 - Try with `-v` flag to see detailed error info
 - Standard V4L2 controls will still work even if XU fails
 - Some features require a specific firmware version
-
-**Preview won't start / stays black**
-- Another application (browser, meeting app) may already be streaming from the
-  camera — UVC allows only one streaming client at a time. Close it and toggle
-  **Start Preview** again.
-- The main `/dev/videoN` node is usually the streaming one; if the camera
-  exposes several, connect to the lowest-numbered one (`v4l2-ctl --list-devices`).
-- All non-streaming controls (PTZ, image, modes) work even when preview cannot
-  start.
 
 **Camera not detected**
 - Check USB connection: `lsusb | grep 2e1a`

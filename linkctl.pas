@@ -61,8 +61,17 @@ program linkctl;
 uses
   SysUtils, Classes, uv4l2, uinsta360link;
 
+type
+  { TInsta360Link.OnLog is a 'procedure ... of object' event, so the callback
+    must be a method, not a free-standing procedure. This tiny class adapts the
+    console logger to that signature. }
+  TConsoleLog = class
+    procedure Handle(Sender: TObject; const Msg: string);
+  end;
+
 var
   Cam: TInsta360Link;
+  ConsoleLog: TConsoleLog;
   DevicePath: string;
   XUnitID: Integer;
   Verbose: Boolean;
@@ -111,7 +120,7 @@ begin
   WriteLn('  xu <selector> <hex_bytes...>   Raw XU command');
 end;
 
-procedure LogHandler(Sender: TObject; const Msg: string);
+procedure TConsoleLog.Handle(Sender: TObject; const Msg: string);
 begin
   if Verbose then
     WriteLn('[LOG] ', Msg);
@@ -161,13 +170,30 @@ begin
             (LowerCase(s) = 'yes') or (LowerCase(s) = 'enable');
 end;
 
+function IsOnOff(const S: string): Boolean;
+var
+  V: string;
+begin
+  V := LowerCase(S);
+  Result := (V = 'on') or (V = 'off') or (V = '1') or (V = '0') or
+    (V = 'true') or (V = 'false') or (V = 'yes') or (V = 'no') or
+    (V = 'enable') or (V = 'disable');
+end;
+
+procedure UsageError(const Msg: string);
+begin
+  WriteLn(StdErr, 'ERROR: ', Msg);
+  WriteLn(StdErr, 'Run "linkctl help" for usage.');
+  Halt(2);
+end;
+
 function ConnectCamera: Boolean;
 begin
   if DevicePath = '' then
     DevicePath := AutoDetectDevice;
 
   Cam := TInsta360Link.Create;
-  Cam.OnLog := @LogHandler;
+  Cam.OnLog := @ConsoleLog.Handle;
 
   if XUnitID >= 0 then
     Cam.XU_UnitID := Byte(XUnitID);
@@ -218,13 +244,16 @@ begin
 end;
 
 var
-  i, argIdx: Integer;
+  i, j, argIdx: Integer;
   cmd: string;
   ok: Boolean;
+  sel: Byte;
+  data: array of Byte;
 begin
   DevicePath := '';
   XUnitID := -1;
   Verbose := False;
+  ConsoleLog := TConsoleLog.Create;
 
   if ParamCount = 0 then
   begin
@@ -237,10 +266,22 @@ begin
   while (argIdx <= ParamCount) and (ParamStr(argIdx)[1] = '-') do
   begin
     case ParamStr(argIdx) of
-      '-d': begin Inc(argIdx); DevicePath := ParamStr(argIdx); end;
-      '-u': begin Inc(argIdx); XUnitID := StrToIntDef(ParamStr(argIdx), -1); end;
+      '-d': begin
+        if argIdx = ParamCount then UsageError('-d requires a device path');
+        Inc(argIdx);
+        DevicePath := ParamStr(argIdx);
+      end;
+      '-u': begin
+        if argIdx = ParamCount then UsageError('-u requires a unit ID');
+        Inc(argIdx);
+        if not TryStrToInt(ParamStr(argIdx), XUnitID) or
+           (XUnitID < 0) or (XUnitID > 255) then
+          UsageError('-u expects a unit ID from 0 to 255');
+      end;
       '-v': Verbose := True;
       '-h', '--help': begin ShowHelp; Exit; end;
+    else
+      UsageError('unknown option: ' + ParamStr(argIdx));
     end;
     Inc(argIdx);
   end;
@@ -253,6 +294,51 @@ begin
 
   cmd := LowerCase(ParamStr(argIdx));
   Inc(argIdx);
+
+  // Validate command arguments before opening the camera. ParamStr returns an
+  // empty string for missing arguments, which previously turned into unsafe
+  // default values such as pan=0 or zoom=100.
+  if (cmd = 'move') and (argIdx + 1 > ParamCount) then
+    UsageError('move requires <pan> <tilt>')
+  else if (cmd = 'preset') and (argIdx + 1 > ParamCount) then
+    UsageError('preset requires save|recall <0-5>')
+  else if (cmd = 'xu') and (argIdx + 1 > ParamCount) then
+    UsageError('xu requires <selector> <hex_byte> [hex_byte...]')
+  else if (cmd = 'pan') or (cmd = 'tilt') or (cmd = 'zoom') or
+          (cmd = 'tracking') or (cmd = 'frame') or (cmd = 'deskview') or
+          (cmd = 'whiteboard') or (cmd = 'overhead') or
+          (cmd = 'brightness') or (cmd = 'contrast') or
+          (cmd = 'saturation') or (cmd = 'sharpness') or (cmd = 'gain') or
+          (cmd = 'backlight') or (cmd = 'wb') or (cmd = 'exposure') or
+          (cmd = 'focus') then
+    if argIdx > ParamCount then UsageError(cmd + ' requires an argument');
+
+  if ((cmd = 'tracking') or (cmd = 'deskview') or (cmd = 'whiteboard') or
+      (cmd = 'overhead') or (cmd = 'backlight')) and
+     not IsOnOff(ParamStr(argIdx)) then
+    UsageError(cmd + ' expects on or off');
+
+  if (cmd = 'pan') or (cmd = 'tilt') or (cmd = 'zoom') or
+     (cmd = 'brightness') or (cmd = 'contrast') or (cmd = 'saturation') or
+     (cmd = 'sharpness') or (cmd = 'gain') then
+    if not TryStrToInt(ParamStr(argIdx), i) then
+      UsageError(cmd + ' expects an integer');
+
+  if cmd = 'move' then
+  begin
+    if not TryStrToInt(ParamStr(argIdx), i) or
+       not TryStrToInt(ParamStr(argIdx + 1), j) then
+      UsageError('move expects two integers');
+  end;
+
+  if cmd = 'preset' then
+  begin
+    if (LowerCase(ParamStr(argIdx)) <> 'save') and
+       (LowerCase(ParamStr(argIdx)) <> 'recall') then
+      UsageError('preset expects save or recall');
+    if not TryStrToInt(ParamStr(argIdx + 1), i) or (i < 0) or (i > 5) then
+      UsageError('preset index must be from 0 to 5');
+  end;
 
   // Commands that don't need a connection
   if cmd = 'list' then
@@ -307,7 +393,7 @@ begin
     else if cmd = 'overhead' then
       ok := Cam.SetOverhead(ParseOnOff(ParamStr(argIdx)))
     else if cmd = 'normal' then
-      ok := (Cam.SetCameraMode(cmNormal) or True)
+      ok := Cam.SetCameraMode(cmNormal)
 
     // ===== Image =====
     else if cmd = 'brightness' then
@@ -369,8 +455,6 @@ begin
     begin
       if argIdx < ParamCount then
       begin
-        var sel: Byte;
-        var data: array of Byte;
         sel := StrToIntDef(ParamStr(argIdx), 0);
         Inc(argIdx);
         SetLength(data, ParamCount - argIdx + 1);

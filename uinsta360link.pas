@@ -101,6 +101,7 @@ type
     FDriverName: string;
     FBusInfo: string;
     FXU_UnitID: Byte;        // Extension Unit ID (9 for Insta360 Link)
+    FXU_UnitIDOverride: Boolean;
     FXU_Lens: array[1..20] of Word; // Cached GET_LEN for each selector
     FPresets: array[0..5] of TPresetPosition; // Software presets
     FOnLog: TLogEvent;
@@ -128,6 +129,10 @@ type
 
     procedure Log(const Msg: string);
     procedure Log(const Fmt: string; const Args: array of const);
+    { Snapshot the current errno once and format it as 'errno=N: message'.
+      Avoids evaluating fpGetErrno twice in a single log call, which can
+      read a different (stale) errno for the number vs. the message. }
+    function ErrInfo: string;
     function QueryControlRange(CtrlID: LongWord): TCtrlRange;
     procedure CacheControlRanges;
     function DetectXU_UnitID: Byte;
@@ -135,6 +140,7 @@ type
     function XU_SetPadded(Selector: Byte; const Data: array of Byte): Boolean;
     function XU_GetPadded(Selector: Byte; var Data: array of Byte): Boolean;
     function XU_SetMode(ModeID, ModeFlag: Byte): Boolean;
+    procedure SetXU_UnitID(Value: Byte);
 
   public
     constructor Create;
@@ -262,7 +268,7 @@ type
     property DriverName: string read FDriverName;
     property BusInfo: string read FBusInfo;
     property FD: cint read FFD;
-    property XU_UnitID: Byte read FXU_UnitID write FXU_UnitID;
+    property XU_UnitID: Byte read FXU_UnitID write SetXU_UnitID;
     property CurrentMode: TCameraMode read FCurrentMode;
     property AITrackingEnabled: Boolean read FAITrackingEnabled;
     property TrackingFrame: TTrackingFrame read FTrackingFrame;
@@ -296,6 +302,7 @@ begin
   FConnected := False;
   FCameraModel := cmUnknown;
   FXU_UnitID := 9; // Default XU unit ID for Insta360 Link
+  FXU_UnitIDOverride := False;
   FillChar(FXU_Lens, SizeOf(FXU_Lens), 0);
   FillChar(FPresets, SizeOf(FPresets), 0);
   FCurrentMode := cmNormal;
@@ -304,6 +311,12 @@ begin
   FTrackingTarget := ttSingle;
   FPanPos := 0;
   FTiltPos := 0;
+end;
+
+procedure TInsta360Link.SetXU_UnitID(Value: Byte);
+begin
+  FXU_UnitID := Value;
+  FXU_UnitIDOverride := True;
 end;
 
 destructor TInsta360Link.Destroy;
@@ -321,6 +334,14 @@ end;
 procedure TInsta360Link.Log(const Fmt: string; const Args: array of const);
 begin
   Log(Format(Fmt, Args));
+end;
+
+function TInsta360Link.ErrInfo: string;
+var
+  e: cint;
+begin
+  e := fpGetErrno;
+  Result := Format('errno=%d: %s', [e, SysErrorMessage(e)]);
 end;
 
 function TInsta360Link.QueryControlRange(CtrlID: LongWord): TCtrlRange;
@@ -612,7 +633,7 @@ begin
   if Result then
     Log('XU Mode SET: byte[0]=$%s byte[1]=$%s', [IntToHex(ModeID, 2), IntToHex(ModeFlag, 2)])
   else
-    Log('XU Mode SET FAILED (errno=%d: %s)', [fpGetErrno, SysErrorMessage(fpGetErrno)]);
+    Log('XU Mode SET FAILED (%s)', [ErrInfo]);
 end;
 
 function TInsta360Link.Open(const DevPath: string): Boolean;
@@ -674,8 +695,11 @@ begin
     cmUnknown: Log('Camera model: Unknown');
   end;
 
-  // Try to detect the XU unit ID
-  FXU_UnitID := DetectXU_UnitID;
+  // Respect a caller-supplied unit ID; otherwise auto-detect it.
+  if not FXU_UnitIDOverride then
+    FXU_UnitID := DetectXU_UnitID
+  else
+    Log('Using requested XU unit ID: %d', [FXU_UnitID]);
 
   // Scan all selectors on detected unit to find data sizes
   ScanXU_Selectors;
@@ -795,7 +819,7 @@ begin
     FTiltPos := newTilt;
   end
   else
-    Log('Pan/Tilt FAILED (errno=%d: %s)', [fpGetErrno, SysErrorMessage(fpGetErrno)]);
+    Log('Pan/Tilt FAILED (%s)', [ErrInfo]);
 end;
 
 function TInsta360Link.PanTiltStop: Boolean;
@@ -914,8 +938,7 @@ begin
     end;
   end
   else
-    Log('Tracking frame FAILED (errno=%d: %s)',
-      [fpGetErrno, SysErrorMessage(fpGetErrno)]);
+    Log('Tracking frame FAILED (%s)', [ErrInfo]);
 end;
 
 function TInsta360Link.GetTrackingFrame: TTrackingFrame;
@@ -962,8 +985,7 @@ begin
   if not UVC_XU_GetCur(FFD, XU_TRACKING_TARGET_UNIT, XU_TRACKING_TARGET_CONTROL,
     @buf[0], dataLen) then
   begin
-    Log('Tracking target: read FAILED (errno=%d: %s)',
-      [fpGetErrno, SysErrorMessage(fpGetErrno)]);
+    Log('Tracking target: read FAILED (%s)', [ErrInfo]);
     // Try writing anyway with default buffer
     FillChar(buf, SizeOf(buf), 0);
   end
@@ -987,8 +1009,7 @@ begin
     end;
   end
   else
-    Log('Tracking target FAILED (errno=%d: %s)',
-      [fpGetErrno, SysErrorMessage(fpGetErrno)]);
+    Log('Tracking target FAILED (%s)', [ErrInfo]);
 end;
 
 function TInsta360Link.GetTrackingTarget: TTrackingTarget;

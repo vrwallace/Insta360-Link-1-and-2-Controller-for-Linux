@@ -19,7 +19,8 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls,
-  ExtCtrls, ComCtrls, Spin, Buttons, IniFiles, uv4l2, uinsta360link;
+  ExtCtrls, ComCtrls, Spin, Buttons, IniFiles, uv4l2, uinsta360link,
+  uvideocap;
 
 type
   { TfrmMain }
@@ -30,6 +31,21 @@ type
   private
     FCam: TInsta360Link;
     FUpdating: Boolean;  // Prevent feedback loops on slider changes
+
+    // --- Live preview ---
+    FCapture: TVideoCapture;
+    FPreviewBmp: TBitmap;
+    grpPreview: TGroupBox;
+    pnlPreviewBar: TPanel;
+    imgPreview: TImage;
+    btnPreview: TButton;
+    lblPreviewInfo: TLabel;
+    tmrPreview: TTimer;
+
+    // --- Press-and-hold PTZ ---
+    tmrPTZ: TTimer;
+    FPTZPanStep: Integer;   // degrees per tick while a D-pad button is held
+    FPTZTiltStep: Integer;
 
     // --- Top bar: Device ---
     pnlTop: TPanel;
@@ -129,10 +145,20 @@ type
     procedure DisconnectClick(Sender: TObject);
     procedure RefreshClick(Sender: TObject);
 
-    // PTZ handlers
-    procedure PTZClick(Sender: TObject);
+    // PTZ handlers (press-and-hold)
+    procedure PTZMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure PTZMouseUp(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure PTZRepeatTimer(Sender: TObject);
     procedure HomeClick(Sender: TObject);
     procedure ZoomChange(Sender: TObject);
+
+    // Preview handlers
+    procedure PreviewToggleClick(Sender: TObject);
+    procedure PreviewTimer(Sender: TObject);
+    procedure StartPreview;
+    procedure StopPreview;
 
     // Mode handlers
     procedure TrackingOnClick(Sender: TObject);
@@ -185,6 +211,8 @@ begin
   FCam := TInsta360Link.Create;
   FCam.OnLog := @CamLog;
   FUpdating := False;
+  FCapture := TVideoCapture.Create;
+  FPreviewBmp := TBitmap.Create;
   BuildUI;
   RefreshDeviceList;
   LoadSettings;
@@ -194,11 +222,15 @@ end;
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
   SaveSettings;
+  StopPreview;
+  FCapture.Free;
+  FPreviewBmp.Free;
   FCam.Free;
 end;
 
 procedure TfrmMain.FormClose(Sender: TObject; var CloseAction: TCloseAction);
 begin
+  StopPreview;
   FCam.Close;
 end;
 
@@ -256,7 +288,7 @@ var
 begin
   // === Form setup ===
   Caption := 'Insta360 Link Controller for Linux';
-  Width := 960;
+  Width := 1420;
   Height := 760;
   Position := poScreenCenter;
 
@@ -298,15 +330,45 @@ begin
   // Tag encodes direction: bits [7:4]=panDir, [3:0]=tiltDir
   //   panDir: 0=none, 1=left, 2=right
   //   tiltDir: 0=none, 1=up, 2=down
-  btnUpLeft  := MakeSpeedButton(grpPTZ,  20, 20, 44, 44, '↖', $11, @PTZClick);
-  btnUp      := MakeSpeedButton(grpPTZ,  70, 20, 44, 44, '↑', $01, @PTZClick);
-  btnUpRight := MakeSpeedButton(grpPTZ, 120, 20, 44, 44, '↗', $21, @PTZClick);
-  btnLeft    := MakeSpeedButton(grpPTZ,  20, 70, 44, 44, '←', $10, @PTZClick);
+  // Directional buttons use press-and-hold (mouse down/up) for continuous
+  // motion; the Home button stays a plain click.
+  btnUpLeft  := MakeSpeedButton(grpPTZ,  20, 20, 44, 44, '↖', $11, nil);
+  btnUp      := MakeSpeedButton(grpPTZ,  70, 20, 44, 44, '↑', $01, nil);
+  btnUpRight := MakeSpeedButton(grpPTZ, 120, 20, 44, 44, '↗', $21, nil);
+  btnLeft    := MakeSpeedButton(grpPTZ,  20, 70, 44, 44, '←', $10, nil);
   btnHome    := MakeSpeedButton(grpPTZ,  70, 70, 44, 44, '⌂',   0, @HomeClick);
-  btnRight   := MakeSpeedButton(grpPTZ, 120, 70, 44, 44, '→', $20, @PTZClick);
-  btnDownLeft  := MakeSpeedButton(grpPTZ,  20, 120, 44, 44, '↙', $12, @PTZClick);
-  btnDown      := MakeSpeedButton(grpPTZ,  70, 120, 44, 44, '↓', $02, @PTZClick);
-  btnDownRight := MakeSpeedButton(grpPTZ, 120, 120, 44, 44, '↘', $22, @PTZClick);
+  btnRight   := MakeSpeedButton(grpPTZ, 120, 70, 44, 44, '→', $20, nil);
+  btnDownLeft  := MakeSpeedButton(grpPTZ,  20, 120, 44, 44, '↙', $12, nil);
+  btnDown      := MakeSpeedButton(grpPTZ,  70, 120, 44, 44, '↓', $02, nil);
+  btnDownRight := MakeSpeedButton(grpPTZ, 120, 120, 44, 44, '↘', $22, nil);
+
+  for i := 0 to 7 do
+  begin
+    case i of
+      0: btnUp.OnMouseDown := @PTZMouseDown;
+      1: btnDown.OnMouseDown := @PTZMouseDown;
+      2: btnLeft.OnMouseDown := @PTZMouseDown;
+      3: btnRight.OnMouseDown := @PTZMouseDown;
+      4: btnUpLeft.OnMouseDown := @PTZMouseDown;
+      5: btnUpRight.OnMouseDown := @PTZMouseDown;
+      6: btnDownLeft.OnMouseDown := @PTZMouseDown;
+      7: btnDownRight.OnMouseDown := @PTZMouseDown;
+    end;
+  end;
+  btnUp.OnMouseUp := @PTZMouseUp;
+  btnDown.OnMouseUp := @PTZMouseUp;
+  btnLeft.OnMouseUp := @PTZMouseUp;
+  btnRight.OnMouseUp := @PTZMouseUp;
+  btnUpLeft.OnMouseUp := @PTZMouseUp;
+  btnUpRight.OnMouseUp := @PTZMouseUp;
+  btnDownLeft.OnMouseUp := @PTZMouseUp;
+  btnDownRight.OnMouseUp := @PTZMouseUp;
+
+  // Repeat timer drives continuous motion while a button is held down
+  tmrPTZ := TTimer.Create(Self);
+  tmrPTZ.Interval := 150;
+  tmrPTZ.Enabled := False;
+  tmrPTZ.OnTimer := @PTZRepeatTimer;
 
   lblPanStep := MakeLabel(grpPTZ, 174, 30, 'Pan:');
   sePanStep := TSpinEdit.Create(Self);
@@ -434,7 +496,7 @@ begin
   lblWBTemp := MakeLabel(grpImage, 8, Y, 'WB Temp:');
   tbWBTemp := MakeTrackBar(grpImage, 90, Y - 2, 220, 2000, 10000, @WBTempChange);
   tbWBTemp.Position := 6400;
-  lblWBTempV := MakeLabel(grpImage, 320, Y, '4000K');
+  lblWBTempV := MakeLabel(grpImage, 320, Y, '6400K');
 
   // Exposure
   grpExposure := TGroupBox.Create(Self);
@@ -471,6 +533,48 @@ begin
   tbFocus := MakeTrackBar(grpFocus, 90, 50, 220, 0, 100, @FocusChange);
   tbFocus.Position := 50;
   lblFocusV := MakeLabel(grpFocus, 320, 52, '0');
+
+  // Live preview (center, right of the image controls).
+  // Anchored to the panel edges so it grows with the window; inside, a
+  // bottom bar holds the controls and the image fills the remaining space,
+  // so nothing is clipped regardless of font size / DPI.
+  // Fixed-size landscape box (not anchored to right/bottom) so the image area
+  // stays wider-than-tall and matched to the 16:9 frame. A wider-than-frame
+  // area would leave empty space beside the centered image; a tall/portrait
+  // area would make a 16:9 frame appear cropped.
+  grpPreview := TGroupBox.Create(Self);
+  grpPreview.Parent := pnlCenter;
+  grpPreview.SetBounds(382, 4, 496, 360);
+  grpPreview.Anchors := [akLeft, akTop];
+  grpPreview.Caption := ' Live Preview ';
+
+  // Bottom control bar (created before the image so alClient gets the rest)
+  pnlPreviewBar := TPanel.Create(Self);
+  pnlPreviewBar.Parent := grpPreview;
+  pnlPreviewBar.Align := alBottom;
+  pnlPreviewBar.Height := 44;
+  pnlPreviewBar.BevelOuter := bvNone;
+
+  btnPreview := MakeButton(pnlPreviewBar, 8, 6, 150, 32,
+    'Start Preview', @PreviewToggleClick);
+  lblPreviewInfo := MakeLabel(pnlPreviewBar, 170, 14, '');
+  lblPreviewInfo.AutoSize := True;
+  lblPreviewInfo.Anchors := [akLeft, akTop];
+
+  // Image fills the landscape area above the bar, scaled to fit (whole frame),
+  // left/top-justified (Center := False).
+  imgPreview := TImage.Create(Self);
+  imgPreview.Parent := grpPreview;
+  imgPreview.Align := alClient;
+  imgPreview.BorderSpacing.Around := 6;
+  imgPreview.Stretch := True;
+  imgPreview.Proportional := True;
+  imgPreview.Center := False;
+
+  tmrPreview := TTimer.Create(Self);
+  tmrPreview.Interval := 40; // ~25 fps poll
+  tmrPreview.Enabled := False;
+  tmrPreview.OnTimer := @PreviewTimer;
 
   // === RIGHT: Presets + Log ===
   pnlRight := TPanel.Create(Self);
@@ -560,6 +664,7 @@ begin
     UpdateUIState;
     tmrTrackingPoll.Enabled := True;
     CamLog(Self, 'Connected to ' + devpath);
+    StartPreview; // auto-start live preview (logs and continues if it fails)
   end
   else
   begin
@@ -570,6 +675,7 @@ end;
 
 procedure TfrmMain.DisconnectClick(Sender: TObject);
 begin
+  StopPreview; // must stop streaming before the fd is closed
   tmrTrackingPoll.Enabled := False;
   btnTrackingOn.Font.Style := [];
   btnTrackingOn.Caption := 'ON';
@@ -581,31 +687,51 @@ begin
   UpdateUIState;
 end;
 
-{ ===== PTZ Handlers ===== }
+{ ===== PTZ Handlers (press-and-hold) ===== }
 
-procedure TfrmMain.PTZClick(Sender: TObject);
+procedure TfrmMain.PTZMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
 var
   dirTag, panDir, tiltDir: Integer;
-  panDelta, tiltDelta: Integer;
 begin
   if not FCam.Connected then Exit;
   dirTag := (Sender as TSpeedButton).Tag;
   panDir := (dirTag shr 4) and $F;
   tiltDir := dirTag and $F;
 
-  panDelta := 0;
-  tiltDelta := 0;
-
+  FPTZPanStep := 0;
+  FPTZTiltStep := 0;
   case panDir of
-    1: panDelta := -sePanStep.Value;  // Left
-    2: panDelta := sePanStep.Value;   // Right
+    1: FPTZPanStep := -sePanStep.Value;  // Left
+    2: FPTZPanStep := sePanStep.Value;   // Right
   end;
   case tiltDir of
-    1: tiltDelta := seTiltStep.Value;  // Up
-    2: tiltDelta := -seTiltStep.Value; // Down
+    1: FPTZTiltStep := seTiltStep.Value;  // Up
+    2: FPTZTiltStep := -seTiltStep.Value; // Down
   end;
 
-  FCam.PanTiltRelative(panDelta, tiltDelta);
+  // Move once immediately, then let the repeat timer continue while held
+  FCam.PanTiltRelative(FPTZPanStep, FPTZTiltStep);
+  tmrPTZ.Enabled := True;
+end;
+
+procedure TfrmMain.PTZMouseUp(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  tmrPTZ.Enabled := False;
+  FPTZPanStep := 0;
+  FPTZTiltStep := 0;
+end;
+
+procedure TfrmMain.PTZRepeatTimer(Sender: TObject);
+begin
+  if not FCam.Connected then
+  begin
+    tmrPTZ.Enabled := False;
+    Exit;
+  end;
+  if (FPTZPanStep <> 0) or (FPTZTiltStep <> 0) then
+    FCam.PanTiltRelative(FPTZPanStep, FPTZTiltStep);
 end;
 
 procedure TfrmMain.HomeClick(Sender: TObject);
@@ -618,6 +744,60 @@ begin
   if FUpdating or not FCam.Connected then Exit;
   FCam.SetZoom(tbZoom.Position);
   lblZoomVal.Caption := Format('%.1fx', [tbZoom.Position / 100.0]);
+end;
+
+{ ===== Live Preview ===== }
+
+procedure TfrmMain.StartPreview;
+begin
+  if FCapture.Streaming then Exit;
+  if not FCam.Connected then Exit;
+
+  // Stream on the camera's existing (non-blocking) fd. 1280x720 is requested;
+  // the driver negotiates the nearest supported size/format.
+  if FCapture.Start(FCam.FD, 1280, 720) then
+  begin
+    tmrPreview.Enabled := True;
+    btnPreview.Caption := 'Stop Preview';
+    lblPreviewInfo.Caption := Format('%dx%d %s',
+      [FCapture.Width, FCapture.Height, FourCCToStr(FCapture.PixFmt)]);
+    CamLog(Self, Format('Preview started: %dx%d %s',
+      [FCapture.Width, FCapture.Height, FourCCToStr(FCapture.PixFmt)]));
+  end
+  else
+    CamLog(Self, 'Preview FAILED to start (camera may be in use by another app)');
+end;
+
+procedure TfrmMain.StopPreview;
+begin
+  tmrPreview.Enabled := False;
+  if FCapture.Streaming then
+  begin
+    FCapture.Stop;
+    CamLog(Self, 'Preview stopped');
+  end;
+  if Assigned(btnPreview) then
+    btnPreview.Caption := 'Start Preview';
+  if Assigned(lblPreviewInfo) then
+    lblPreviewInfo.Caption := '';
+end;
+
+procedure TfrmMain.PreviewToggleClick(Sender: TObject);
+begin
+  if FCapture.Streaming then
+    StopPreview
+  else
+    StartPreview;
+end;
+
+procedure TfrmMain.PreviewTimer(Sender: TObject);
+begin
+  if not FCapture.Streaming then Exit;
+  if FCapture.GrabFrame(FPreviewBmp) then
+  begin
+    imgPreview.Picture.Bitmap.Assign(FPreviewBmp);
+    imgPreview.Invalidate;
+  end;
 end;
 
 { ===== Mode Handlers ===== }
@@ -874,6 +1054,7 @@ begin
   grpExposure.Enabled := connected;
   grpFocus.Enabled := connected;
   grpPresets.Enabled := connected;
+  btnPreview.Enabled := connected;
 
   // Framing only works on Link 2
   if connected and (FCam.CameraModel = cmLink) then
@@ -895,6 +1076,7 @@ var
   i: Integer;
   p: TPresetPosition;
 begin
+  ForceDirectories(GetAppConfigDir(False));
   ini := TIniFile.Create(GetAppConfigDir(False) + 'insta360link.ini');
   try
     ini.WriteString('Device', 'LastDevice', FCam.DevicePath);
@@ -917,7 +1099,7 @@ end;
 procedure TfrmMain.LoadSettings;
 var
   ini: TIniFile;
-  fn: string;
+  fn, lastDev: string;
   i: Integer;
   p: TPresetPosition;
 begin
@@ -928,6 +1110,17 @@ begin
   try
     sePanStep.Value := ini.ReadInteger('PTZ', 'PanStep', 8);
     seTiltStep.Value := ini.ReadInteger('PTZ', 'TiltStep', 8);
+
+    // Re-select the last-used device if it's still present in the list.
+    // Combo items are formatted as '<path>  [card - driver]', so match on prefix.
+    lastDev := ini.ReadString('Device', 'LastDevice', '');
+    if lastDev <> '' then
+      for i := 0 to cboDevice.Items.Count - 1 do
+        if Pos(lastDev + ' ', cboDevice.Items[i] + ' ') = 1 then
+        begin
+          cboDevice.ItemIndex := i;
+          Break;
+        end;
     for i := 0 to 5 do
     begin
       edtPresetName[i].Text := ini.ReadString('Presets', 'Name' + IntToStr(i),
