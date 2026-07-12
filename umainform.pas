@@ -936,15 +936,32 @@ end;
 { ===== Presets ===== }
 
 procedure TfrmMain.PresetRecallClick(Sender: TObject);
+var
+  p: TPresetPosition;
+  wasUpdating: Boolean;
 begin
-  if FCam.Connected then
-    FCam.RecallPreset((Sender as TButton).Tag);
+  if not FCam.Connected then Exit;
+
+  p := FCam.GetPreset((Sender as TButton).Tag);
+  if not FCam.RecallPreset((Sender as TButton).Tag) then Exit;
+
+  // Recall changes the camera directly, so mirror the recalled zoom in the UI
+  // without firing ZoomChange and sending the same command a second time.
+  wasUpdating := FUpdating;
+  FUpdating := True;
+  try
+    tbZoom.Position := p.Zoom;
+    lblZoomVal.Caption := Format('%.1fx', [tbZoom.Position / 100.0]);
+  finally
+    FUpdating := wasUpdating;
+  end;
 end;
 
 procedure TfrmMain.PresetSaveClick(Sender: TObject);
 begin
-  if FCam.Connected then
-    FCam.SavePreset((Sender as TButton).Tag);
+  if FCam.Connected and FCam.SavePreset((Sender as TButton).Tag) then
+    // Persist immediately so a saved preset survives a crash or forced exit.
+    SaveSettings;
 end;
 
 { ===== Log ===== }
