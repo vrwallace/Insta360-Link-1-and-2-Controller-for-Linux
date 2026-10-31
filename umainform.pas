@@ -39,7 +39,6 @@ type
     pnlPreviewBar: TPanel;
     imgPreview: TImage;
     btnPreview: TButton;
-    chkMirror: TCheckBox;
     lblPreviewInfo: TLabel;
     tmrPreview: TTimer;
 
@@ -156,7 +155,6 @@ type
     procedure ZoomChange(Sender: TObject);
 
     // Preview handlers
-    procedure MirrorChange(Sender: TObject);
     procedure PreviewToggleClick(Sender: TObject);
     procedure PreviewTimer(Sender: TObject);
     procedure StartPreview;
@@ -557,16 +555,9 @@ begin
   pnlPreviewBar.Height := 44;
   pnlPreviewBar.BevelOuter := bvNone;
 
-  btnPreview := MakeButton(pnlPreviewBar, 8, 6, 120, 32,
+  btnPreview := MakeButton(pnlPreviewBar, 8, 6, 150, 32,
     'Start Preview', @PreviewToggleClick);
-  chkMirror := TCheckBox.Create(Self);
-  chkMirror.Parent := pnlPreviewBar;
-  chkMirror.SetBounds(136, 12, 120, 20);
-  chkMirror.Caption := 'Mirror Preview';
-  chkMirror.Checked := True;
-  chkMirror.OnChange := @MirrorChange;
-
-  lblPreviewInfo := MakeLabel(pnlPreviewBar, 264, 14, '');
+  lblPreviewInfo := MakeLabel(pnlPreviewBar, 170, 14, '');
   lblPreviewInfo.AutoSize := True;
   lblPreviewInfo.Anchors := [akLeft, akTop];
 
@@ -726,9 +717,6 @@ begin
     1: FPTZPanStep := sePanStep.Value;   // Left
     2: FPTZPanStep := -sePanStep.Value;  // Right
   end;
-  // If preview is unmirrored, invert pan so clicking Left/Right always matches screen direction
-  if not chkMirror.Checked then
-    FPTZPanStep := -FPTZPanStep;
   case tiltDir of
     1: FPTZTiltStep := seTiltStep.Value;  // Up
     2: FPTZTiltStep := -seTiltStep.Value; // Down
@@ -777,12 +765,6 @@ end;
 
 { ===== Live Preview ===== }
 
-procedure TfrmMain.MirrorChange(Sender: TObject);
-begin
-  if FCapture <> nil then
-    FCapture.Mirror := chkMirror.Checked;
-end;
-
 procedure TfrmMain.StartPreview;
 begin
   if FCapture.Streaming then Exit;
@@ -792,7 +774,6 @@ begin
   // the driver negotiates the nearest supported size/format.
   if FCapture.Start(FCam.FD, 1280, 720) then
   begin
-    FCapture.Mirror := chkMirror.Checked;
     tmrPreview.Enabled := True;
     btnPreview.Caption := 'Stop Preview';
     lblPreviewInfo.Caption := Format('%dx%d %s',
@@ -1142,7 +1123,6 @@ begin
     ini.WriteString('Device', 'LastDevice', FCam.DevicePath);
     ini.WriteInteger('PTZ', 'PanStep', sePanStep.Value);
     ini.WriteInteger('PTZ', 'TiltStep', seTiltStep.Value);
-    ini.WriteBool('Preview', 'Mirror', chkMirror.Checked);
     for i := 0 to 5 do
     begin
       ini.WriteString('Presets', 'Name' + IntToStr(i), edtPresetName[i].Text);
@@ -1171,9 +1151,6 @@ begin
   try
     sePanStep.Value := ini.ReadInteger('PTZ', 'PanStep', 8);
     seTiltStep.Value := ini.ReadInteger('PTZ', 'TiltStep', 8);
-    chkMirror.Checked := ini.ReadBool('Preview', 'Mirror', True);
-    if FCapture <> nil then
-      FCapture.Mirror := chkMirror.Checked;
 
     // Re-select the last-used device if it's still present in the list.
     // Combo items are formatted as '<path>  [card - driver]', so match on prefix.
