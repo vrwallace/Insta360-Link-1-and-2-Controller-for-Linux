@@ -746,6 +746,13 @@ begin
   Result := False;
   if not FConnected then Exit;
 
+  // If in any downward or special mode, turn it off first to wake the camera
+  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
+  begin
+    XU_SetMode(XU_MODE_OFF, 0);
+    FCurrentMode := cmNormal;
+  end;
+
   // Try individual set first (Link 1), fall back to combined (Link 2)
   Result := V4L2_SetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, Value);
   if not Result then
@@ -773,6 +780,13 @@ function TInsta360Link.SetTiltAbsolute(Value: LongInt): Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
+
+  // If in any downward or special mode, turn it off first to wake the camera
+  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
+  begin
+    XU_SetMode(XU_MODE_OFF, 0);
+    FCurrentMode := cmNormal;
+  end;
 
   Result := V4L2_SetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, Value);
   if not Result then
@@ -803,6 +817,13 @@ var
 begin
   Result := False;
   if not FConnected then Exit;
+
+  // If in any downward or special mode, turn it off first to wake the camera
+  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
+  begin
+    XU_SetMode(XU_MODE_OFF, 0);
+    FCurrentMode := cmNormal;
+  end;
 
   // Always read actual current hardware positions first to avoid drift or jumping
   GetPanAbsolute;
@@ -873,6 +894,13 @@ var
 begin
   Result := False;
   if not FConnected then Exit;
+
+  // If in any downward or special mode, turn it off first to wake the camera
+  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
+  begin
+    XU_SetMode(XU_MODE_OFF, 0);
+    FCurrentMode := cmNormal;
+  end;
 
   // Try XU reset command
   data := 1;
@@ -1082,10 +1110,7 @@ begin
   case Mode of
     cmNormal:
       begin
-        // If coming out of a downward mode (DeskView or Overhead),
-        // reset the gimbal back to center to wake it up and level the camera.
-        if (FCurrentMode in [cmDeskView, cmOverhead]) then
-          GimbalReset;
+        GimbalReset;
         Result := True;
         Log('Mode: Normal');
       end;
@@ -1289,6 +1314,13 @@ begin
   begin
     Log('Preset %d not saved yet', [Index]);
     Exit;
+  end;
+
+  // If in any downward or special mode, turn it off first to wake the camera
+  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
+  begin
+    XU_SetMode(XU_MODE_OFF, 0);
+    FCurrentMode := cmNormal;
   end;
 
   // Software preset: restore saved pan/tilt/zoom

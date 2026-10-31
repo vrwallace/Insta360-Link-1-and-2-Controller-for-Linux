@@ -161,6 +161,7 @@ type
     procedure StartPreview;
     procedure StopPreview;
     procedure RestartPreview;
+    procedure WakeAndRestorePreview;
 
     // Mode handlers
     procedure TrackingOnClick(Sender: TObject);
@@ -700,6 +701,7 @@ procedure TfrmMain.PTZMouseDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 var
   dirTag, panDir, tiltDir: Integer;
+  wasSpecial: Boolean;
 begin
   if not FCam.Connected then Exit;
 
@@ -712,6 +714,14 @@ begin
     btnTrackingOn.Caption := 'ON';
     btnTrackingOff.Font.Style := [];
     btnTrackingOff.Caption := 'OFF';
+  end;
+
+  // If in any downward or special mode, turn it off and restore preview
+  wasSpecial := (FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard]);
+  if wasSpecial then
+  begin
+    FCam.SetCameraMode(cmNormal);
+    WakeAndRestorePreview;
   end;
 
   dirTag := (Sender as TSpeedButton).Tag;
@@ -755,12 +765,10 @@ end;
 
 procedure TfrmMain.HomeClick(Sender: TObject);
 begin
-  if FCam.Connected then
-  begin
-    FCam.GimbalReset;
-    if not FCapture.Streaming then
-      StartPreview;
-  end;
+  if not FCam.Connected then Exit;
+  FCam.SetCameraMode(cmNormal);
+  FCam.GimbalReset;
+  WakeAndRestorePreview;
 end;
 
 procedure TfrmMain.ZoomChange(Sender: TObject);
@@ -808,18 +816,26 @@ end;
 
 procedure TfrmMain.RestartPreview;
 begin
-  if not FCapture.Streaming then Exit;
+  if not FCam.Connected then Exit;
   FCapture.Stop;
   Sleep(150);
-  if FCam.Connected then
+  if FCapture.Start(FCam.FD, 1280, 720) then
   begin
-    if FCapture.Start(FCam.FD, 1280, 720) then
-    begin
-      FStallCount := 0;
+    FStallCount := 0;
+    tmrPreview.Enabled := True;
+    if Assigned(btnPreview) then
+      btnPreview.Caption := 'Stop Preview';
+    if Assigned(lblPreviewInfo) then
       lblPreviewInfo.Caption := Format('%dx%d %s',
         [FCapture.Width, FCapture.Height, FourCCToStr(FCapture.PixFmt)]);
-    end;
   end;
+end;
+
+procedure TfrmMain.WakeAndRestorePreview;
+begin
+  if not FCam.Connected then Exit;
+  if FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview')) then
+    RestartPreview;
 end;
 
 procedure TfrmMain.PreviewToggleClick(Sender: TObject);
@@ -840,12 +856,16 @@ begin
   end
   else
   begin
-    Inc(FStallCount);
-    // If stream stalls for > 2 seconds (e.g. camera slept or mode changed), auto-restart
-    if FStallCount = 65 then
+    // Don't repeatedly cycle stream while parked in downward overhead mode
+    if FCam.CurrentMode <> cmOverhead then
     begin
-      RestartPreview;
-      FStallCount := 0;
+      Inc(FStallCount);
+      // If stream stalls for > 2 seconds (e.g. camera slept or mode changed), auto-restart
+      if FStallCount >= 65 then
+      begin
+        RestartPreview;
+        FStallCount := 0;
+      end;
     end;
   end;
 end;
@@ -853,9 +873,14 @@ end;
 { ===== Mode Handlers ===== }
 
 procedure TfrmMain.TrackingOnClick(Sender: TObject);
+var
+  wasSpecial: Boolean;
 begin
   if not FCam.Connected then Exit;
+  wasSpecial := (FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard]);
   FCam.SetAITracking(True);
+  if wasSpecial or FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview')) then
+    WakeAndRestorePreview;
   // Sync framing combo with camera's current state
   case FCam.GetTrackingFrame of
     tfHead:     cboTrackFrame.ItemIndex := 0;
@@ -904,31 +929,26 @@ end;
 
 procedure TfrmMain.ModeButtonClick(Sender: TObject);
 var
-  wasStreaming: Boolean;
+  wasPreviewing: Boolean;
 begin
   if not FCam.Connected then Exit;
-  wasStreaming := FCapture.Streaming;
+  wasPreviewing := FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview'));
   case (Sender as TButton).Tag of
     0: FCam.SetCameraMode(cmNormal);
     1: FCam.SetCameraMode(cmDeskView);
     2: FCam.SetCameraMode(cmWhiteboard);
     3: FCam.SetCameraMode(cmOverhead);
   end;
-  if wasStreaming then
-    RestartPreview;
+  if wasPreviewing then
+    WakeAndRestorePreview;
 end;
 
 procedure TfrmMain.GimbalResetClick(Sender: TObject);
-var
-  wasStreaming: Boolean;
 begin
-  if FCam.Connected then
-  begin
-    wasStreaming := FCapture.Streaming;
-    FCam.GimbalReset;
-    if wasStreaming then
-      RestartPreview;
-  end;
+  if not FCam.Connected then Exit;
+  FCam.SetCameraMode(cmNormal);
+  FCam.GimbalReset;
+  WakeAndRestorePreview;
 end;
 
 { ===== Image Handlers ===== }
@@ -1002,11 +1022,16 @@ procedure TfrmMain.PresetRecallClick(Sender: TObject);
 var
   p: TPresetPosition;
   wasUpdating: Boolean;
+  wasSpecial: Boolean;
 begin
   if not FCam.Connected then Exit;
 
+  wasSpecial := (FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard]);
   p := FCam.GetPreset((Sender as TButton).Tag);
   if not FCam.RecallPreset((Sender as TButton).Tag) then Exit;
+
+  if wasSpecial or FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview')) then
+    WakeAndRestorePreview;
 
   // Recall changes the camera directly, so mirror the recalled zoom in the UI
   // without firing ZoomChange and sending the same command a second time.
