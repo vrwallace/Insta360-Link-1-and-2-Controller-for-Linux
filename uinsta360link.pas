@@ -1083,12 +1083,9 @@ begin
     cmNormal:
       begin
         // If coming out of a downward mode (DeskView or Overhead),
-        // bring tilt back to horizontal level so the camera doesn't stay facing down.
+        // reset the gimbal back to center to wake it up and level the camera.
         if (FCurrentMode in [cmDeskView, cmOverhead]) then
-        begin
-          if GetTiltAbsolute < 0 then
-            SetTiltAbsolute(0);
-        end;
+          GimbalReset;
         Result := True;
         Log('Mode: Normal');
       end;

@@ -870,7 +870,12 @@ procedure TfrmMain.ModeButtonClick(Sender: TObject);
 begin
   if not FCam.Connected then Exit;
   case (Sender as TButton).Tag of
-    0: FCam.SetCameraMode(cmNormal);
+    0:
+      begin
+        FCam.SetCameraMode(cmNormal);
+        if not FCapture.Streaming then
+          StartPreview;
+      end;
     1: FCam.SetCameraMode(cmDeskView);
     2: FCam.SetCameraMode(cmWhiteboard);
     3: FCam.SetCameraMode(cmOverhead);
