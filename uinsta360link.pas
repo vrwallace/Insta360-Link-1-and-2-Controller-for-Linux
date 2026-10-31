@@ -711,6 +711,10 @@ begin
   // Cache all control ranges
   CacheControlRanges;
 
+  // Synchronize initial software position tracking with actual hardware position
+  GetPanAbsolute;
+  GetTiltAbsolute;
+
   // Log available controls summary
   if FPanRange.Available then
     Log('Pan: %d..%d (step %d)', [FPanRange.Min, FPanRange.Max, FPanRange.Step]);
@@ -757,7 +761,11 @@ begin
 end;
 
 function TInsta360Link.GetPanAbsolute: LongInt;
+var
+  val: LongInt;
 begin
+  if FConnected and V4L2_GetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, val) then
+    FPanPos := val;
   Result := FPanPos;
 end;
 
@@ -780,16 +788,25 @@ begin
 end;
 
 function TInsta360Link.GetTiltAbsolute: LongInt;
+var
+  val: LongInt;
 begin
+  if FConnected and V4L2_GetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, val) then
+    FTiltPos := val;
   Result := FTiltPos;
 end;
 
 function TInsta360Link.PanTiltRelative(PanDelta, TiltDelta: LongInt): Boolean;
 var
   newPan, newTilt: LongInt;
+  minSafeTilt: LongInt;
 begin
   Result := False;
   if not FConnected then Exit;
+
+  // Always read actual current hardware positions first to avoid drift or jumping
+  GetPanAbsolute;
+  GetTiltAbsolute;
 
   newPan := FPanPos + PanDelta * 3600;
   newTilt := FTiltPos + TiltDelta * 3600;
@@ -802,7 +819,12 @@ begin
   end;
   if FTiltRange.Available then
   begin
-    if newTilt < FTiltRange.Min then newTilt := FTiltRange.Min;
+    // Prevent manual downward tilt from reaching the hardware privacy socket (-90 deg / -324000).
+    // Tilting all the way to -90 deg triggers the Insta360 hardware privacy switch, which powers
+    // down the sensor and halts video streaming. -252000 corresponds to ~-70 degrees down.
+    minSafeTilt := -252000;
+    if minSafeTilt < FTiltRange.Min then minSafeTilt := FTiltRange.Min;
+    if newTilt < minSafeTilt then newTilt := minSafeTilt;
     if newTilt > FTiltRange.Max then newTilt := FTiltRange.Max;
   end;
 
@@ -1060,6 +1082,13 @@ begin
   case Mode of
     cmNormal:
       begin
+        // If coming out of a downward mode (DeskView or Overhead),
+        // bring tilt back to horizontal level so the camera doesn't stay facing down.
+        if (FCurrentMode in [cmDeskView, cmOverhead]) then
+        begin
+          if GetTiltAbsolute < 0 then
+            SetTiltAbsolute(0);
+        end;
         Result := True;
         Log('Mode: Normal');
       end;

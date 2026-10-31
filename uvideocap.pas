@@ -26,7 +26,7 @@ unit uvideocap;
 interface
 
 uses
-  BaseUnix, SysUtils, Classes, Graphics, IntfGraphics, fpImage, uv4l2;
+  BaseUnix, SysUtils, Classes, Graphics, IntfGraphics, fpImage, fpreadjpeg, uv4l2;
 
 type
   TVideoCapture = class
@@ -38,6 +38,8 @@ type
     FBytesPerLine: LongWord;
     FPixFmt: LongWord;
     FStreaming: Boolean;
+    FMemStream: TMemoryStream;       // Reusable stream for MJPEG decode
+    FJPEG: TJPEGImage;               // Reusable JPEG decoder object
     function TrySetFormat(PixFmt: LongWord; W, H: Integer): Boolean;
     function SetFormat(W, H: Integer): Boolean;
     function InitBuffers(Count: Integer): Boolean;
@@ -164,11 +166,16 @@ begin
   inherited Create;
   FFD := -1;
   FStreaming := False;
+  FMemStream := TMemoryStream.Create;
+  FJPEG := TJPEGImage.Create;
+  FJPEG.Performance := jpBestSpeed;
 end;
 
 destructor TVideoCapture.Destroy;
 begin
   Stop;
+  FJPEG.Free;
+  FMemStream.Free;
   inherited Destroy;
 end;
 
@@ -318,21 +325,14 @@ begin
 end;
 
 procedure TVideoCapture.DecodeMJPEG(Data: Pointer; Len: LongWord; Bmp: TBitmap);
-var
-  ms: TMemoryStream;
-  jpg: TJPEGImage;
 begin
-  ms := TMemoryStream.Create;
-  jpg := TJPEGImage.Create;
-  try
-    ms.WriteBuffer(Data^, Len);
-    ms.Position := 0;
-    jpg.LoadFromStream(ms);
-    Bmp.Assign(jpg);
-  finally
-    jpg.Free;
-    ms.Free;
-  end;
+  if (FMemStream = nil) or (FJPEG = nil) then Exit;
+  FMemStream.Position := 0;
+  FMemStream.Size := 0;
+  FMemStream.WriteBuffer(Data^, Len);
+  FMemStream.Position := 0;
+  FJPEG.LoadFromStream(FMemStream);
+  Bmp.Assign(FJPEG);
 end;
 
 procedure TVideoCapture.DecodeYUYV(Data: Pointer; Bmp: TBitmap);
@@ -396,37 +396,49 @@ end;
 
 function TVideoCapture.GrabFrame(Bmp: TBitmap): Boolean;
 var
-  buf: Tv4l2_buffer;
+  buf, lastBuf: Tv4l2_buffer;
+  hasFrame: Boolean;
 begin
   Result := False;
   if not FStreaming then Exit;
 
+  hasFrame := False;
   FillChar(buf, SizeOf(buf), 0);
   buf.btype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
   buf.memory := V4L2_MEMORY_MMAP;
 
-  // Non-blocking dequeue; EAGAIN (no frame ready) just returns False.
-  if FpIOCtl(FFD, VIDIOC_DQBUF, @buf) <> 0 then Exit;
+  // Drain all ready frames, keeping only the most recent one.
+  // This discards stale backlog so the preview never falls behind real time.
+  while FpIOCtl(FFD, VIDIOC_DQBUF, @buf) = 0 do
+  begin
+    if hasFrame then
+      FpIOCtl(FFD, VIDIOC_QBUF, @lastBuf);
+    lastBuf := buf;
+    hasFrame := True;
+    FillChar(buf, SizeOf(buf), 0);
+    buf.btype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory := V4L2_MEMORY_MMAP;
+  end;
+
+  if not hasFrame then Exit;
 
   try
-    if (buf.index <= High(FBufStart)) and
-       (buf.bytesused <= FBufLen[buf.index]) then
+    if (lastBuf.index <= High(FBufStart)) and
+       (lastBuf.bytesused <= FBufLen[lastBuf.index]) then
     begin
       case FPixFmt of
-        V4L2_PIX_FMT_MJPEG: DecodeMJPEG(FBufStart[buf.index], buf.bytesused, Bmp);
-        V4L2_PIX_FMT_YUYV:  DecodeYUYV(FBufStart[buf.index], Bmp);
+        V4L2_PIX_FMT_MJPEG: DecodeMJPEG(FBufStart[lastBuf.index], lastBuf.bytesused, Bmp);
+        V4L2_PIX_FMT_YUYV:  DecodeYUYV(FBufStart[lastBuf.index], Bmp);
       end;
       Result := True;
     end;
   except
-    // A malformed frame should be dropped, not terminate the GUI timer or
-    // permanently remove this buffer from the capture queue.
+    // A malformed frame should be dropped
     Result := False;
   end;
 
-  // Every successfully dequeued buffer must be returned, even after a decode
-  // error, or the stream eventually runs out of buffers and stalls.
-  FpIOCtl(FFD, VIDIOC_QBUF, @buf);
+  // Re-queue the buffer we just decoded
+  FpIOCtl(FFD, VIDIOC_QBUF, @lastBuf);
 end;
 
 end.

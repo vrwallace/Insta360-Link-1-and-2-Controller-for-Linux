@@ -572,7 +572,7 @@ begin
   imgPreview.Center := False;
 
   tmrPreview := TTimer.Create(Self);
-  tmrPreview.Interval := 40; // ~25 fps poll
+  tmrPreview.Interval := 30; // ~33 fps smooth preview
   tmrPreview.Enabled := False;
   tmrPreview.OnTimer := @PreviewTimer;
 
@@ -695,6 +695,18 @@ var
   dirTag, panDir, tiltDir: Integer;
 begin
   if not FCam.Connected then Exit;
+
+  // Auto-disable tracking when manually moving gimbal to avoid fighting motor controls
+  // or triggering the camera's 10-second lost-target sleep timer
+  if FCam.AITrackingEnabled or FCam.GetAITracking then
+  begin
+    FCam.SetAITracking(False);
+    btnTrackingOn.Font.Style := [];
+    btnTrackingOn.Caption := 'ON';
+    btnTrackingOff.Font.Style := [];
+    btnTrackingOff.Caption := 'OFF';
+  end;
+
   dirTag := (Sender as TSpeedButton).Tag;
   panDir := (dirTag shr 4) and $F;
   tiltDir := dirTag and $F;
@@ -736,7 +748,12 @@ end;
 
 procedure TfrmMain.HomeClick(Sender: TObject);
 begin
-  if FCam.Connected then FCam.GimbalReset;
+  if FCam.Connected then
+  begin
+    FCam.GimbalReset;
+    if not FCapture.Streaming then
+      StartPreview;
+  end;
 end;
 
 procedure TfrmMain.ZoomChange(Sender: TObject);
@@ -793,11 +810,8 @@ end;
 procedure TfrmMain.PreviewTimer(Sender: TObject);
 begin
   if not FCapture.Streaming then Exit;
-  if FCapture.GrabFrame(FPreviewBmp) then
-  begin
-    imgPreview.Picture.Bitmap.Assign(FPreviewBmp);
+  if FCapture.GrabFrame(imgPreview.Picture.Bitmap) then
     imgPreview.Invalidate;
-  end;
 end;
 
 { ===== Mode Handlers ===== }
@@ -865,7 +879,12 @@ end;
 
 procedure TfrmMain.GimbalResetClick(Sender: TObject);
 begin
-  if FCam.Connected then FCam.GimbalReset;
+  if FCam.Connected then
+  begin
+    FCam.GimbalReset;
+    if not FCapture.Streaming then
+      StartPreview;
+  end;
 end;
 
 { ===== Image Handlers ===== }
