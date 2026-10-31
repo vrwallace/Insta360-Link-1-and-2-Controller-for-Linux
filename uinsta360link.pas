@@ -58,7 +58,8 @@ type
   TCameraModel = (
     cmUnknown,
     cmLink,       // Insta360 Link (PID 4C01)
-    cmLink2       // Insta360 Link 2 (PID 4C04)
+    cmLink2,      // Insta360 Link 2 (PID 4C04)
+    cmLink2Pro    // Insta360 Link 2 Pro (PID 4C06)
   );
 
   { AI tracking framing mode }
@@ -684,15 +685,18 @@ begin
       if pidStr = '4c01' then
         FCameraModel := cmLink
       else if pidStr = '4c04' then
-        FCameraModel := cmLink2;
+        FCameraModel := cmLink2
+      else if pidStr = '4c06' then
+        FCameraModel := cmLink2Pro;
     end;
   except
   end;
 
   case FCameraModel of
-    cmLink:    Log('Camera model: Insta360 Link');
-    cmLink2:   Log('Camera model: Insta360 Link 2');
-    cmUnknown: Log('Camera model: Unknown');
+    cmLink:     Log('Camera model: Insta360 Link');
+    cmLink2:    Log('Camera model: Insta360 Link 2');
+    cmLink2Pro: Log('Camera model: Insta360 Link 2 Pro');
+    cmUnknown:  Log('Camera model: Unknown');
   end;
 
   // Respect a caller-supplied unit ID; otherwise auto-detect it.
@@ -1282,7 +1286,7 @@ end;
 
 function TInsta360Link.GetPreset(Index: Byte): TPresetPosition;
 begin
-  FillChar(Result, SizeOf(Result), 0);
+  Result := Default(TPresetPosition);
   if Index <= 5 then
     Result := FPresets[Index];
 end;

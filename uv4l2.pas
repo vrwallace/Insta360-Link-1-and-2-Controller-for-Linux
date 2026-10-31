@@ -39,6 +39,11 @@ function _IOC(dir, ioctype, nr, size: LongWord): LongWord; inline;
 const
   VIDIOC_TYPE = Ord('V');
 
+{ ===== V4L2 capability flags ===== }
+const
+  V4L2_CAP_VIDEO_CAPTURE = $00000001;
+  V4L2_CAP_DEVICE_CAPS   = $80000000;
+
 { ===== V4L2 User-class control IDs (base $00980900) ===== }
 const
   V4L2_CID_BASE                     = $00980900;
@@ -420,6 +425,7 @@ var
   cap: Tv4l2_capability;
   fd: cint;
   devpath: string;
+  caps: LongWord;
 begin
   Count := 0;
   FillChar(cap, SizeOf(cap), 0);
@@ -432,6 +438,17 @@ begin
       begin
         if V4L2_QueryCap(fd, cap) then
         begin
+          // UVC cameras expose a second /dev/videoN metadata node that rejects
+          // XU ioctls with ENOTTY; only list nodes that can capture video.
+          if (cap.capabilities and V4L2_CAP_DEVICE_CAPS) <> 0 then
+            caps := cap.device_caps
+          else
+            caps := cap.capabilities;
+          if (caps and V4L2_CAP_VIDEO_CAPTURE) = 0 then
+          begin
+            V4L2_Close(fd);
+            Continue;
+          end;
           if Count <= High(Devices) then
           begin
             Devices[Count] := Format('%s  [%s - %s]',

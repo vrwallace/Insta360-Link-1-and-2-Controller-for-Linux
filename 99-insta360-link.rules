@@ -2,8 +2,9 @@
 # Install: sudo cp 99-insta360-link.rules /etc/udev/rules.d/
 # Reload: sudo udevadm control --reload-rules && sudo udevadm trigger
 #
-# Insta360 Link:   VID=2e1a PID=4c01
-# Insta360 Link 2: VID=2e1a PID=4c02 (verify with lsusb)
+# Insta360 Link:       VID=2e1a PID=4c01
+# Insta360 Link 2:     VID=2e1a PID=4c04
+# Insta360 Link 2 Pro: VID=2e1a PID=4c06
 
 # Grant video group access to Insta360 Link cameras
 SUBSYSTEM=="video4linux", ATTRS{idVendor}=="2e1a", MODE="0666"

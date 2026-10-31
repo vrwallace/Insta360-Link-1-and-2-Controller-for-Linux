@@ -254,12 +254,12 @@ begin
   XUnitID := -1;
   Verbose := False;
   ConsoleLog := TConsoleLog.Create;
-
-  if ParamCount = 0 then
-  begin
-    ShowHelp;
-    Exit;
-  end;
+  try
+    if ParamCount = 0 then
+    begin
+      ShowHelp;
+      Exit;
+    end;
 
   // Parse options
   argIdx := 1;
@@ -486,5 +486,8 @@ begin
   finally
     Cam.Close;
     Cam.Free;
+  end;
+  finally
+    ConsoleLog.Free;
   end;
 end.
