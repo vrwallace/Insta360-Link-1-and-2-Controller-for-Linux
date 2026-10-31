@@ -714,8 +714,8 @@ begin
   FPTZPanStep := 0;
   FPTZTiltStep := 0;
   case panDir of
-    1: FPTZPanStep := -sePanStep.Value;  // Left
-    2: FPTZPanStep := sePanStep.Value;   // Right
+    1: FPTZPanStep := sePanStep.Value;   // Left
+    2: FPTZPanStep := -sePanStep.Value;  // Right
   end;
   case tiltDir of
     1: FPTZTiltStep := seTiltStep.Value;  // Up
