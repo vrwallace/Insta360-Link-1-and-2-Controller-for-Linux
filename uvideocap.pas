@@ -38,12 +38,14 @@ type
     FBytesPerLine: LongWord;
     FPixFmt: LongWord;
     FStreaming: Boolean;
+    FMirror: Boolean;
     FMemStream: TMemoryStream;       // Reusable stream for MJPEG decode
     FJPEG: TJPEGImage;               // Reusable JPEG decoder object
     function TrySetFormat(PixFmt: LongWord; W, H: Integer): Boolean;
     function SetFormat(W, H: Integer): Boolean;
     function InitBuffers(Count: Integer): Boolean;
     procedure FreeBuffers;
+    procedure MirrorBitmap(Bmp: TBitmap);
     procedure DecodeMJPEG(Data: Pointer; Len: LongWord; Bmp: TBitmap);
     procedure DecodeYUYV(Data: Pointer; Bmp: TBitmap);
   public
@@ -60,6 +62,7 @@ type
     function GrabFrame(Bmp: TBitmap): Boolean;
 
     property Streaming: Boolean read FStreaming;
+    property Mirror: Boolean read FMirror write FMirror;
     property Width: Integer read FWidth;
     property Height: Integer read FHeight;
     property PixFmt: LongWord read FPixFmt;
@@ -166,6 +169,7 @@ begin
   inherited Create;
   FFD := -1;
   FStreaming := False;
+  FMirror := False;
   FMemStream := TMemoryStream.Create;
   FJPEG := TJPEGImage.Create;
   FJPEG.Performance := jpBestSpeed;
@@ -324,6 +328,58 @@ begin
   FFD := -1;
 end;
 
+procedure TVideoCapture.MirrorBitmap(Bmp: TBitmap);
+var
+  intf: TLazIntfImage;
+  x, y, w, h, halfW: Integer;
+  line: PByte;
+  bpp: Integer;
+  p1, p2: PByte;
+  tmp32: LongWord;
+  tmp24: array[0..2] of Byte;
+begin
+  if (Bmp = nil) or (Bmp.Width <= 1) or (Bmp.Height <= 1) then Exit;
+  intf := Bmp.CreateIntfImage;
+  try
+    w := intf.Width;
+    h := intf.Height;
+    halfW := w div 2;
+    bpp := intf.DataDescription.BitsPerPixel div 8;
+    if bpp = 4 then
+    begin
+      for y := 0 to h - 1 do
+      begin
+        line := PByte(intf.GetDataLineStart(y));
+        for x := 0 to halfW - 1 do
+        begin
+          tmp32 := PLongWord(line + x * 4)^;
+          PLongWord(line + x * 4)^ := PLongWord(line + (w - 1 - x) * 4)^;
+          PLongWord(line + (w - 1 - x) * 4)^ := tmp32;
+        end;
+      end;
+      Bmp.LoadFromIntfImage(intf);
+    end
+    else if bpp = 3 then
+    begin
+      for y := 0 to h - 1 do
+      begin
+        line := PByte(intf.GetDataLineStart(y));
+        for x := 0 to halfW - 1 do
+        begin
+          p1 := line + x * 3;
+          p2 := line + (w - 1 - x) * 3;
+          tmp24[0] := p1[0]; tmp24[1] := p1[1]; tmp24[2] := p1[2];
+          p1[0] := p2[0]; p1[1] := p2[1]; p1[2] := p2[2];
+          p2[0] := tmp24[0]; p2[1] := tmp24[1]; p2[2] := tmp24[2];
+        end;
+      end;
+      Bmp.LoadFromIntfImage(intf);
+    end;
+  finally
+    intf.Free;
+  end;
+end;
+
 procedure TVideoCapture.DecodeMJPEG(Data: Pointer; Len: LongWord; Bmp: TBitmap);
 begin
   if (FMemStream = nil) or (FJPEG = nil) then Exit;
@@ -333,6 +389,8 @@ begin
   FMemStream.Position := 0;
   FJPEG.LoadFromStream(FMemStream);
   Bmp.Assign(FJPEG);
+  if FMirror then
+    MirrorBitmap(Bmp);
 end;
 
 procedure TVideoCapture.DecodeYUYV(Data: Pointer; Bmp: TBitmap);
@@ -392,6 +450,8 @@ begin
   finally
     intf.Free;
   end;
+  if FMirror then
+    MirrorBitmap(Bmp);
 end;
 
 function TVideoCapture.GrabFrame(Bmp: TBitmap): Boolean;
