@@ -272,11 +272,21 @@ end;
 function TVideoCapture.Start(fd: cint; PrefW, PrefH: Integer): Boolean;
 var
   bt: cint;
+  req: Tv4l2_requestbuffers;
 begin
   Result := False;
   if FStreaming then Exit(True);
   if fd < 0 then Exit;
   FFD := fd;
+
+  // Flush any stale stream or allocated buffers on this FD before setting format
+  bt := V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  FpIOCtl(FFD, VIDIOC_STREAMOFF, @bt);
+  FillChar(req, SizeOf(req), 0);
+  req.count := 0;
+  req.rtype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  req.memory := V4L2_MEMORY_MMAP;
+  FpIOCtl(FFD, VIDIOC_REQBUFS, @req);
 
   if not SetFormat(PrefW, PrefH) then Exit;
   if not InitBuffers(4) then

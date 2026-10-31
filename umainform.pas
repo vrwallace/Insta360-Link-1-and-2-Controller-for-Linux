@@ -41,6 +41,7 @@ type
     btnPreview: TButton;
     lblPreviewInfo: TLabel;
     tmrPreview: TTimer;
+    FStallCount: Integer;
 
     // --- Press-and-hold PTZ ---
     tmrPTZ: TTimer;
@@ -159,6 +160,7 @@ type
     procedure PreviewTimer(Sender: TObject);
     procedure StartPreview;
     procedure StopPreview;
+    procedure RestartPreview;
 
     // Mode handlers
     procedure TrackingOnClick(Sender: TObject);
@@ -211,6 +213,7 @@ begin
   FCam := TInsta360Link.Create;
   FCam.OnLog := @CamLog;
   FUpdating := False;
+  FStallCount := 0;
   FCapture := TVideoCapture.Create;
   FPreviewBmp := TBitmap.Create;
   BuildUI;
@@ -423,11 +426,15 @@ begin
   btnNormal.Tag := 0;
   btnDeskView := MakeButton(grpModes, 124, Y, 110, 30, 'DeskView', @ModeButtonClick);
   btnDeskView.Tag := 1;
+  btnDeskView.Hint := 'DeskView: angles ~45° down to show desk/keyboard from monitor mount';
+  btnDeskView.ShowHint := True;
   Inc(Y, 36);
   btnWhiteboard := MakeButton(grpModes, 8, Y, 110, 30, 'Whiteboard', @ModeButtonClick);
   btnWhiteboard.Tag := 2;
   btnOverhead := MakeButton(grpModes, 124, Y, 110, 30, 'Overhead', @ModeButtonClick);
   btnOverhead.Tag := 3;
+  btnOverhead.Hint := 'Overhead: angles 90° straight down (requires boom arm / overhead stand)';
+  btnOverhead.ShowHint := True;
 
   Inc(Y, 44);
   btnGimbalReset := MakeButton(grpModes, 8, Y, 226, 30, 'Gimbal Reset', @GimbalResetClick);
@@ -799,6 +806,22 @@ begin
     lblPreviewInfo.Caption := '';
 end;
 
+procedure TfrmMain.RestartPreview;
+begin
+  if not FCapture.Streaming then Exit;
+  FCapture.Stop;
+  Sleep(150);
+  if FCam.Connected then
+  begin
+    if FCapture.Start(FCam.FD, 1280, 720) then
+    begin
+      FStallCount := 0;
+      lblPreviewInfo.Caption := Format('%dx%d %s',
+        [FCapture.Width, FCapture.Height, FourCCToStr(FCapture.PixFmt)]);
+    end;
+  end;
+end;
+
 procedure TfrmMain.PreviewToggleClick(Sender: TObject);
 begin
   if FCapture.Streaming then
@@ -811,7 +834,20 @@ procedure TfrmMain.PreviewTimer(Sender: TObject);
 begin
   if not FCapture.Streaming then Exit;
   if FCapture.GrabFrame(imgPreview.Picture.Bitmap) then
+  begin
+    FStallCount := 0;
     imgPreview.Invalidate;
+  end
+  else
+  begin
+    Inc(FStallCount);
+    // If stream stalls for > 2 seconds (e.g. camera slept or mode changed), auto-restart
+    if FStallCount = 65 then
+    begin
+      RestartPreview;
+      FStallCount := 0;
+    end;
+  end;
 end;
 
 { ===== Mode Handlers ===== }
@@ -867,28 +903,31 @@ begin
 end;
 
 procedure TfrmMain.ModeButtonClick(Sender: TObject);
+var
+  wasStreaming: Boolean;
 begin
   if not FCam.Connected then Exit;
+  wasStreaming := FCapture.Streaming;
   case (Sender as TButton).Tag of
-    0:
-      begin
-        FCam.SetCameraMode(cmNormal);
-        if not FCapture.Streaming then
-          StartPreview;
-      end;
+    0: FCam.SetCameraMode(cmNormal);
     1: FCam.SetCameraMode(cmDeskView);
     2: FCam.SetCameraMode(cmWhiteboard);
     3: FCam.SetCameraMode(cmOverhead);
   end;
+  if wasStreaming then
+    RestartPreview;
 end;
 
 procedure TfrmMain.GimbalResetClick(Sender: TObject);
+var
+  wasStreaming: Boolean;
 begin
   if FCam.Connected then
   begin
+    wasStreaming := FCapture.Streaming;
     FCam.GimbalReset;
-    if not FCapture.Streaming then
-      StartPreview;
+    if wasStreaming then
+      RestartPreview;
   end;
 end;
 
