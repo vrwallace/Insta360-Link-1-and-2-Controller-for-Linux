@@ -726,6 +726,9 @@ begin
     1: FPTZPanStep := sePanStep.Value;   // Left
     2: FPTZPanStep := -sePanStep.Value;  // Right
   end;
+  // If preview is unmirrored, invert pan so clicking Left/Right always matches screen direction
+  if not chkMirror.Checked then
+    FPTZPanStep := -FPTZPanStep;
   case tiltDir of
     1: FPTZTiltStep := seTiltStep.Value;  // Up
     2: FPTZTiltStep := -seTiltStep.Value; // Down
