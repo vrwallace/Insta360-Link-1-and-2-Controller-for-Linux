@@ -1,6 +1,6 @@
 object frmMain: TfrmMain
   Left = 200
-  Height = 720
+  Height = 900
   Top = 100
   Width = 960
   Caption = 'Insta360 Link Controller for Linux'

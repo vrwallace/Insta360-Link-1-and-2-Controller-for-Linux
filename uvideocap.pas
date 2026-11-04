@@ -22,6 +22,9 @@
 unit uvideocap;
 
 {$mode objfpc}{$H+}
+{$IFNDEF CPUX86_64}
+  {$FATAL Live preview currently requires the x86-64 Linux V4L2 ABI}
+{$ENDIF}
 
 interface
 
@@ -38,14 +41,17 @@ type
     FBytesPerLine: LongWord;
     FPixFmt: LongWord;
     FStreaming: Boolean;
-    FMemStream: TMemoryStream;       // Reusable stream for MJPEG decode
-    FJPEG: TJPEGImage;               // Reusable JPEG decoder object
+    FLastError: string;
+    FLastErrorCode: Integer;
+    FMemStream: TMemoryStream;
+    FJPEG: TJPEGImage;
+    procedure CaptureError(const Operation: string);
     function TrySetFormat(PixFmt: LongWord; W, H: Integer): Boolean;
     function SetFormat(W, H: Integer): Boolean;
     function InitBuffers(Count: Integer): Boolean;
     procedure FreeBuffers;
     procedure DecodeMJPEG(Data: Pointer; Len: LongWord; Bmp: TBitmap);
-    procedure DecodeYUYV(Data: Pointer; Bmp: TBitmap);
+    procedure DecodeYUYV(Data: Pointer; Len: LongWord; Bmp: TBitmap);
   public
     constructor Create;
     destructor Destroy; override;
@@ -59,6 +65,8 @@ type
       ready (EAGAIN) or not streaming. }
     function GrabFrame(Bmp: TBitmap): Boolean;
 
+    property LastErrorCode: Integer read FLastErrorCode;
+    property LastError: string read FLastError;
     property Streaming: Boolean read FStreaming;
     property Width: Integer read FWidth;
     property Height: Integer read FHeight;
@@ -74,6 +82,7 @@ const
   V4L2_BUF_TYPE_VIDEO_CAPTURE = 1;
   V4L2_MEMORY_MMAP            = 1;
   V4L2_FIELD_NONE             = 1;
+  V4L2_BUF_FLAG_ERROR         = $40;
 
   V4L2_PIX_FMT_YUYV  = $56595559; // 'YUYV'
   V4L2_PIX_FMT_MJPEG = $47504A4D; // 'MJPG'
@@ -190,14 +199,16 @@ begin
   fmt.pix.pixelformat := PixFmt;
   fmt.pix.field := V4L2_FIELD_NONE;
 
-  Result := (FpIOCtl(FFD, VIDIOC_S_FMT, @fmt) = 0)
+  Result := (CameraIoctl(FFD, VIDIOC_S_FMT, @fmt) = 0)
             and (fmt.pix.pixelformat = PixFmt);
   if Result then
   begin
     FWidth := fmt.pix.width;
     FHeight := fmt.pix.height;
-    FBytesPerLine := fmt.pix.bytesperline;
     FPixFmt := fmt.pix.pixelformat;
+    FBytesPerLine := fmt.pix.bytesperline;
+    if (FPixFmt = V4L2_PIX_FMT_YUYV) and (FBytesPerLine < LongWord(FWidth * 2)) then
+      FBytesPerLine := FWidth * 2;
   end;
 end;
 
@@ -220,7 +231,7 @@ begin
   req.count := Count;
   req.rtype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory := V4L2_MEMORY_MMAP;
-  if FpIOCtl(FFD, VIDIOC_REQBUFS, @req) <> 0 then Exit;
+  if CameraIoctl(FFD, VIDIOC_REQBUFS, @req) <> 0 then Exit;
   if req.count < 1 then Exit;
 
   SetLength(FBufStart, req.count);
@@ -237,7 +248,7 @@ begin
     buf.index := i;
     buf.btype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf.memory := V4L2_MEMORY_MMAP;
-    if FpIOCtl(FFD, VIDIOC_QUERYBUF, @buf) <> 0 then Exit;
+    if CameraIoctl(FFD, VIDIOC_QUERYBUF, @buf) <> 0 then Exit;
 
     FBufLen[i] := buf.length;
     FBufStart[i] := Fpmmap(nil, buf.length, PROT_READ or PROT_WRITE,
@@ -249,7 +260,7 @@ begin
     end;
 
     // Queue the buffer for capture
-    if FpIOCtl(FFD, VIDIOC_QBUF, @buf) <> 0 then Exit;
+    if CameraIoctl(FFD, VIDIOC_QBUF, @buf) <> 0 then Exit;
   end;
 
   Result := True;
@@ -269,6 +280,15 @@ begin
   SetLength(FBufLen, 0);
 end;
 
+procedure TVideoCapture.CaptureError(const Operation: string);
+var E: Integer;
+begin
+  E := fpGetErrno;
+  FLastErrorCode := E;
+  FLastError := Operation + ': ' + SysErrorMessage(E);
+  Stop;
+end;
+
 function TVideoCapture.Start(fd: cint; PrefW, PrefH: Integer): Boolean;
 var
   bt: cint;
@@ -276,29 +296,38 @@ var
 begin
   Result := False;
   if FStreaming then Exit(True);
-  if fd < 0 then Exit;
+  FLastError := '';
+  FLastErrorCode := 0;
+  if fd < 0 then
+  begin
+    FLastError := 'No open camera';
+    Exit;
+  end;
   FFD := fd;
-
-  // Flush any stale stream or allocated buffers on this FD before setting format
+  // Restore cleanup of stale stream state before renegotiating format.
   bt := V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  FpIOCtl(FFD, VIDIOC_STREAMOFF, @bt);
+  CameraIoctl(FFD, VIDIOC_STREAMOFF, @bt);
   FillChar(req, SizeOf(req), 0);
-  req.count := 0;
   req.rtype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory := V4L2_MEMORY_MMAP;
-  FpIOCtl(FFD, VIDIOC_REQBUFS, @req);
+  CameraIoctl(FFD, VIDIOC_REQBUFS, @req);
 
-  if not SetFormat(PrefW, PrefH) then Exit;
+  if not SetFormat(PrefW, PrefH) then
+  begin
+    CaptureError('Set preview format');
+    Exit;
+  end;
+
   if not InitBuffers(4) then
   begin
-    FreeBuffers;
+    CaptureError('Allocate preview buffers');
     Exit;
   end;
 
   bt := V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if FpIOCtl(FFD, VIDIOC_STREAMON, @bt) <> 0 then
+  if CameraIoctl(FFD, VIDIOC_STREAMON, @bt) <> 0 then
   begin
-    FreeBuffers;
+    CaptureError('Start preview stream');
     Exit;
   end;
 
@@ -314,7 +343,7 @@ begin
   if FStreaming and (FFD >= 0) then
   begin
     bt := V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    FpIOCtl(FFD, VIDIOC_STREAMOFF, @bt);
+    CameraIoctl(FFD, VIDIOC_STREAMOFF, @bt);
   end;
   FStreaming := False;
 
@@ -328,7 +357,7 @@ begin
     req.count := 0;
     req.rtype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory := V4L2_MEMORY_MMAP;
-    FpIOCtl(FFD, VIDIOC_REQBUFS, @req);
+    CameraIoctl(FFD, VIDIOC_REQBUFS, @req);
   end;
 
   FFD := -1;
@@ -336,16 +365,14 @@ end;
 
 procedure TVideoCapture.DecodeMJPEG(Data: Pointer; Len: LongWord; Bmp: TBitmap);
 begin
-  if (FMemStream = nil) or (FJPEG = nil) then Exit;
-  FMemStream.Position := 0;
-  FMemStream.Size := 0;
+  FMemStream.Clear;
   FMemStream.WriteBuffer(Data^, Len);
   FMemStream.Position := 0;
   FJPEG.LoadFromStream(FMemStream);
   Bmp.Assign(FJPEG);
 end;
 
-procedure TVideoCapture.DecodeYUYV(Data: Pointer; Bmp: TBitmap);
+procedure TVideoCapture.DecodeYUYV(Data: Pointer; Len: LongWord; Bmp: TBitmap);
 var
   intf: TLazIntfImage;
   p: PByte;
@@ -376,6 +403,10 @@ var
   end;
 
 begin
+  if (FWidth <= 0) or (FHeight <= 0) or Odd(FWidth) or
+     (QWord(FBytesPerLine) < QWord(FWidth) * 2) or
+     (QWord(FHeight - 1) * FBytesPerLine + QWord(FWidth) * 2 > Len) then
+    raise EReadError.Create('Truncated or invalid YUYV frame');
   p := PByte(Data);
   Bmp.PixelFormat := pf24bit;
   Bmp.SetSize(FWidth, FHeight);
@@ -406,50 +437,60 @@ end;
 
 function TVideoCapture.GrabFrame(Bmp: TBitmap): Boolean;
 var
-  buf, lastBuf: Tv4l2_buffer;
-  hasFrame: Boolean;
+  Buf, Latest: Tv4l2_buffer;
+  HaveLatest: Boolean;
+  I, E: Integer;
 begin
   Result := False;
   if not FStreaming then Exit;
-
-  hasFrame := False;
-  FillChar(buf, SizeOf(buf), 0);
-  buf.btype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  buf.memory := V4L2_MEMORY_MMAP;
-
-  // Drain all ready frames, keeping only the most recent one.
-  // This discards stale backlog so the preview never falls behind real time.
-  while FpIOCtl(FFD, VIDIOC_DQBUF, @buf) = 0 do
+  HaveLatest := False;
+  // Bounded batch: do not chase buffers refilled by the producer forever.
+  for I := 1 to Length(FBufStart) do
   begin
-    if hasFrame then
-      FpIOCtl(FFD, VIDIOC_QBUF, @lastBuf);
-    lastBuf := buf;
-    hasFrame := True;
-    FillChar(buf, SizeOf(buf), 0);
-    buf.btype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory := V4L2_MEMORY_MMAP;
+    FillChar(Buf, SizeOf(Buf), 0);
+    Buf.btype := V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    Buf.memory := V4L2_MEMORY_MMAP;
+    if CameraIoctl(FFD, VIDIOC_DQBUF, @Buf) <> 0 then
+    begin
+      E := fpGetErrno;
+      if E = ESysEINTR then Continue;
+      // EIO can be temporary signal loss. Do not requeue the failed dequeue;
+      // the GUI stall timer will reset the queue if frames do not resume.
+      if (E = ESysEAGAIN) or (E = ESysEIO) then Break;
+      CaptureError('Dequeue preview frame');
+      Exit;
+    end;
+    if HaveLatest then
+      if CameraIoctl(FFD, VIDIOC_QBUF, @Latest) <> 0 then
+      begin
+        CaptureError('Requeue preview frame');
+        Exit;
+      end;
+    Latest := Buf;
+    HaveLatest := True;
   end;
-
-  if not hasFrame then Exit;
-
+  if not HaveLatest then Exit;
   try
-    if (lastBuf.index <= High(FBufStart)) and
-       (lastBuf.bytesused <= FBufLen[lastBuf.index]) then
+    if (Latest.index < LongWord(Length(FBufStart))) and
+       ((Latest.flags and V4L2_BUF_FLAG_ERROR) = 0) and
+       (Latest.bytesused > 0) and
+       (Latest.bytesused <= FBufLen[Latest.index]) then
     begin
       case FPixFmt of
-        V4L2_PIX_FMT_MJPEG: DecodeMJPEG(FBufStart[lastBuf.index], lastBuf.bytesused, Bmp);
-        V4L2_PIX_FMT_YUYV:  DecodeYUYV(FBufStart[lastBuf.index], Bmp);
+        V4L2_PIX_FMT_MJPEG: DecodeMJPEG(FBufStart[Latest.index], Latest.bytesused, Bmp);
+        V4L2_PIX_FMT_YUYV: DecodeYUYV(FBufStart[Latest.index], Latest.bytesused, Bmp);
       end;
-      Result := True;
+      Result := (FPixFmt = V4L2_PIX_FMT_MJPEG) or (FPixFmt = V4L2_PIX_FMT_YUYV);
     end;
   except
-    // A malformed frame should be dropped
+    // Drop malformed payloads, but always return their buffers below.
     Result := False;
   end;
-
-  // Re-queue the buffer we just decoded
-  FpIOCtl(FFD, VIDIOC_QBUF, @lastBuf);
+  if CameraIoctl(FFD, VIDIOC_QBUF, @Latest) <> 0 then
+  begin
+    Result := False;
+    CaptureError('Requeue preview frame');
+  end;
 end;
 
 end.
-</content>

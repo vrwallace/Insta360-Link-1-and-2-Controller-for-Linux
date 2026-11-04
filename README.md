@@ -8,8 +8,9 @@ A Free Pascal / Lazarus application to control the **Insta360 Link** and **Insta
 |--------|---------|-------|---------|-----|-------|------|
 | Insta360 Link | 2E1A:4C01 | ✅ | ✅ | ✅ V4L2 | ✅ | ✅ |
 | Insta360 Link 2 | 2E1A:4C04 | ✅ | ✅ | ✅ Combined | ✅ | ✅ |
+| Insta360 Link 2 Pro | 2E1A:4C06 | ✅ | ✅ | ✅ Combined | ✅ | ✅ |
 
-Both cameras share identical XU GUIDs and mode control protocol.
+All cameras share identical XU GUIDs and mode control protocols.
 
 ## Features
 
@@ -107,14 +108,14 @@ insta360link/
 
 - **Linux** (tested on Ubuntu 22.04+, Debian, Fedora, Arch)
 - **Free Pascal Compiler** (fpc 3.2.2+)
-- **Lazarus IDE** (3.0+) — for the GUI application
+- **Lazarus IDE** (3.0+) with its **GTK2 LCL widgetset** — for the GUI application
 - **Insta360 Link** webcam connected via USB
 
 ### Install Free Pascal & Lazarus
 
 ```bash
 # Ubuntu/Debian
-sudo apt install fpc lazarus
+sudo apt install fpc lazarus lcl-gtk2
 
 # Fedora
 sudo dnf install fpc lazarus
@@ -129,13 +130,26 @@ sudo pacman -S fpc lazarus
 
 ```bash
 # Option 1: Open in Lazarus IDE
-lazbuild insta360linkgui.lpi
+lazbuild --widgetset=gtk2 insta360linkgui.lpi
 
 # Option 2: Command-line build
-lazbuild --build-mode=Release insta360linkgui.lpi
+lazbuild --build-mode=Release --widgetset=gtk2 insta360linkgui.lpi
 ```
 
-### CLI Tool (requires only fpc)
+The included `Makefile` builds both the GUI and the CLI tool:
+
+```bash
+# Build both GUI and CLI tool
+make all
+
+# Build only GUI (release mode with GTK2 widgetset)
+make release
+
+# Build only CLI tool
+make cli
+```
+
+### CLI Tool standalone compilation (requires only fpc)
 
 ```bash
 fpc -O2 linkctl.pas
@@ -212,9 +226,16 @@ sudo usermod -aG video $USER
 ./linkctl exposure 500      # Manual exposure
 ./linkctl focus auto
 
-# Presets
+# Presets (persisted in ~/.config/Insta360 Link Controller/insta360link.ini)
 ./linkctl preset save 0     # Save current position to slot 0
 ./linkctl preset recall 0   # Recall position from slot 0
+
+# Query Controls
+./linkctl get pan           # Get current pan position
+./linkctl get tilt          # Get current tilt position
+./linkctl get zoom          # Get current zoom
+./linkctl get brightness    # Get current brightness
+./linkctl get tracking      # Query AI tracking state (TRUE/FALSE)
 
 # Scripting example: presentation mode
 ./linkctl tracking on
@@ -334,3 +355,56 @@ Or use the CLI tool:
 ## License
 
 MIT License — free for personal and commercial use.
+
+## Error handling and regression checks
+
+The CLI exits with status **0** on success, **1** on connection, camera-operation,
+read, or preset-storage failure, and **2** on invalid commands or arguments.
+Manual white balance, exposure, and focus require `auto` or a nonnegative
+integer. Raw XU selectors must be 1–255 and each hexadecimal byte must be 00–FF.
+Arguments are checked before opening a camera. A `get` read failure is reported
+as an error rather than displaying a default value. Combined white balance,
+exposure, and focus queries print their component values on separate lines.
+
+GUI and CLI use the same settings path beneath `$XDG_CONFIG_HOME` (or
+`~/.config`), normally `Insta360 Link Controller/insta360link.ini`; an existing
+legacy `insta360link` directory is used when the normal directory is absent.
+Writers lock, merge their changes with the current file, and atomically replace
+it. Closing the GUI preserves presets changed by the CLI unless that slot was
+also edited in the GUI. Preset recall refreshes disk values when no local preset
+save is pending.
+
+On Link 2/Link 2 Pro, presets use the last commanded pan/tilt coordinates,
+restoring the October 31 workaround for unreliable position reads. Tracking or
+movement outside this app may not be reflected in those saved coordinates.
+Zoom read failure prevents saving. Other models use checked position reads.
+
+The October 31 controls are restored: manual moves use degrees times 3600,
+left/right follow the original mapping, tracking is disabled before manual
+movement, and manual downward tilt is limited to -252000 (-70 degrees) to
+avoid the privacy parking position. This limit applies to manual relative
+moves; it does not override firmware-driven DeskView/Overhead movement.
+Home/Gimbal Reset always send an absolute center command after the XU reset.
+Normal recenters when leaving DeskView or Overhead.
+
+Preview uses the original 30ms polling, reusable JPEG decoder, startup cleanup,
+and automatic restart after mode changes/reset. A stalled stream schedules recovery after
+about two seconds. Mode changes and resets schedule a delayed restart, with up
+to five attempts on a separate timer even if capture fails to start. A received
+frame completes recovery; Stop Preview cancels it. Home/reset can start
+a stopped preview. Temporary dequeue EIO is retried; device removal remains a
+terminal error. Bounded dequeue and frame validation remain enabled. The GUI
+preview ABI is explicitly restricted to x86-64 Linux.
+
+Run the hardware-independent regression suite with:
+
+```bash
+make test
+```
+
+It requires Python 3, FPC, Lazarus, and the LCL `nogui` widgetset. Tests build in a
+temporary directory, use fake ioctl responses and mapped temporary files, and
+never open a video device. They cover CLI validation/status, controller failure
+paths, preset merging/concurrent writers, bounded preview and error handling,
+and cleanup. `make clean` removes the GUI/CLI executables and generated unit
+files while preserving source and resources.

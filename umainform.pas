@@ -18,9 +18,9 @@ unit umainform;
 interface
 
 uses
-  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls,
+  Classes, SysUtils, BaseUnix, Forms, Controls, Graphics, Dialogs, StdCtrls,
   ExtCtrls, ComCtrls, Spin, Buttons, IniFiles, uv4l2, uinsta360link,
-  uvideocap;
+  uvideocap, ulinksettings, upreviewretry;
 
 type
   { TfrmMain }
@@ -30,6 +30,8 @@ type
     procedure FormClose(Sender: TObject; var CloseAction: TCloseAction);
   private
     FCam: TInsta360Link;
+    FPresetDirty: set of 0..5;
+    FLoadedNames: array[0..5] of string;
     FUpdating: Boolean;  // Prevent feedback loops on slider changes
 
     // --- Live preview ---
@@ -42,6 +44,8 @@ type
     lblPreviewInfo: TLabel;
     tmrPreview: TTimer;
     FStallCount: Integer;
+    FPreviewRetry: TPreviewRetry;
+    tmrPreviewRecovery: TTimer;
 
     // --- Press-and-hold PTZ ---
     tmrPTZ: TTimer;
@@ -161,7 +165,7 @@ type
     procedure StartPreview;
     procedure StopPreview;
     procedure RestartPreview;
-    procedure WakeAndRestorePreview;
+    procedure PreviewRecoveryTimer(Sender: TObject);
 
     // Mode handlers
     procedure TrackingOnClick(Sender: TObject);
@@ -214,8 +218,8 @@ begin
   FCam := TInsta360Link.Create;
   FCam.OnLog := @CamLog;
   FUpdating := False;
-  FStallCount := 0;
   FCapture := TVideoCapture.Create;
+  FPreviewRetry := TPreviewRetry.Create;
   FPreviewBmp := TBitmap.Create;
   BuildUI;
   RefreshDeviceList;
@@ -225,8 +229,8 @@ end;
 
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
-  SaveSettings;
   StopPreview;
+  FPreviewRetry.Free;
   FCapture.Free;
   FPreviewBmp.Free;
   FCam.Free;
@@ -234,6 +238,9 @@ end;
 
 procedure TfrmMain.FormClose(Sender: TObject; var CloseAction: TCloseAction);
 begin
+  SaveSettings;
+  tmrPTZ.Enabled := False;
+  tmrTrackingPoll.Enabled := False;
   StopPreview;
   FCam.Close;
 end;
@@ -292,8 +299,10 @@ var
 begin
   // === Form setup ===
   Caption := 'Insta360 Link Controller for Linux';
-  Width := 1420;
-  Height := 760;
+  Width := 1450;
+  Height := 900;
+  Constraints.MinWidth := 1280;
+  Constraints.MinHeight := 820;
   Position := poScreenCenter;
 
   // === TOP: Device bar ===
@@ -315,7 +324,7 @@ begin
   btnDisconnect.Enabled := False;
 
   lblStatus := MakeLabel(pnlTop, 670, 10, 'Not connected');
-  lblStatus.Font.Color := clRed;
+  lblStatus.Font.Color := RGBToColor(248, 113, 113);
 
   // === LEFT: PTZ + Modes ===
   pnlLeft := TPanel.Create(Self);
@@ -327,7 +336,7 @@ begin
   // PTZ group
   grpPTZ := TGroupBox.Create(Self);
   grpPTZ.Parent := pnlLeft;
-  grpPTZ.SetBounds(4, 4, 252, 220);
+  grpPTZ.SetBounds(4, 4, 252, 240);
   grpPTZ.Caption := ' PTZ Controls ';
 
   // D-pad: 3x3 grid of speed buttons
@@ -394,7 +403,7 @@ begin
   // Modes group
   grpModes := TGroupBox.Create(Self);
   grpModes.Parent := pnlLeft;
-  grpModes.SetBounds(4, 228, 252, 300);
+  grpModes.SetBounds(4, 252, 252, 330);
   grpModes.Caption := ' Camera Modes ';
 
   Y := 20;
@@ -427,14 +436,14 @@ begin
   btnNormal.Tag := 0;
   btnDeskView := MakeButton(grpModes, 124, Y, 110, 30, 'DeskView', @ModeButtonClick);
   btnDeskView.Tag := 1;
-  btnDeskView.Hint := 'DeskView: angles ~45° down to show desk/keyboard from monitor mount';
+  btnDeskView.Hint := 'DeskView: angles ~45 degrees down from a monitor mount';
   btnDeskView.ShowHint := True;
   Inc(Y, 36);
   btnWhiteboard := MakeButton(grpModes, 8, Y, 110, 30, 'Whiteboard', @ModeButtonClick);
   btnWhiteboard.Tag := 2;
   btnOverhead := MakeButton(grpModes, 124, Y, 110, 30, 'Overhead', @ModeButtonClick);
   btnOverhead.Tag := 3;
-  btnOverhead.Hint := 'Overhead: angles 90° straight down (requires boom arm / overhead stand)';
+  btnOverhead.Hint := 'Overhead: points straight down; requires a boom arm/overhead stand';
   btnOverhead.ShowHint := True;
 
   Inc(Y, 44);
@@ -448,7 +457,7 @@ begin
 
   grpImage := TGroupBox.Create(Self);
   grpImage.Parent := pnlCenter;
-  grpImage.SetBounds(4, 4, 370, 320);
+  grpImage.SetBounds(4, 4, 370, 344);
   grpImage.Caption := ' Image Controls ';
 
   Y := 20;
@@ -509,38 +518,38 @@ begin
   // Exposure
   grpExposure := TGroupBox.Create(Self);
   grpExposure.Parent := pnlCenter;
-  grpExposure.SetBounds(4, 328, 370, 90);
+  grpExposure.SetBounds(4, 356, 370, 120);
   grpExposure.Caption := ' Exposure ';
 
   chkAutoExposure := TCheckBox.Create(Self);
   chkAutoExposure.Parent := grpExposure;
-  chkAutoExposure.SetBounds(8, 20, 130, 22);
+  chkAutoExposure.SetBounds(12, 24, 150, 28);
   chkAutoExposure.Caption := 'Auto Exposure';
   chkAutoExposure.Checked := True;
   chkAutoExposure.OnChange := @AutoExposureChange;
 
-  lblExposure := MakeLabel(grpExposure, 8, 52, 'Value:');
-  tbExposure := MakeTrackBar(grpExposure, 90, 50, 220, 3, 2047, @ExposureChange);
+  lblExposure := MakeLabel(grpExposure, 12, 66, 'Value:');
+  tbExposure := MakeTrackBar(grpExposure, 90, 61, 220, 3, 2047, @ExposureChange);
   tbExposure.Position := 250;
-  lblExposureV := MakeLabel(grpExposure, 320, 52, '250');
+  lblExposureV := MakeLabel(grpExposure, 320, 66, '250');
 
   // Focus
   grpFocus := TGroupBox.Create(Self);
   grpFocus.Parent := pnlCenter;
-  grpFocus.SetBounds(4, 422, 370, 90);
+  grpFocus.SetBounds(4, 484, 370, 120);
   grpFocus.Caption := ' Focus ';
 
   chkAutoFocus := TCheckBox.Create(Self);
   chkAutoFocus.Parent := grpFocus;
-  chkAutoFocus.SetBounds(8, 20, 130, 22);
+  chkAutoFocus.SetBounds(12, 24, 150, 28);
   chkAutoFocus.Caption := 'Auto Focus';
   chkAutoFocus.Checked := True;
   chkAutoFocus.OnChange := @AutoFocusChange;
 
-  lblFocus := MakeLabel(grpFocus, 8, 52, 'Value:');
-  tbFocus := MakeTrackBar(grpFocus, 90, 50, 220, 0, 100, @FocusChange);
+  lblFocus := MakeLabel(grpFocus, 12, 66, 'Value:');
+  tbFocus := MakeTrackBar(grpFocus, 90, 61, 220, 0, 100, @FocusChange);
   tbFocus.Position := 50;
-  lblFocusV := MakeLabel(grpFocus, 320, 52, '0');
+  lblFocusV := MakeLabel(grpFocus, 320, 66, '0');
 
   // Live preview (center, right of the image controls).
   // Anchored to the panel edges so it grows with the window; inside, a
@@ -552,7 +561,7 @@ begin
   // area would make a 16:9 frame appear cropped.
   grpPreview := TGroupBox.Create(Self);
   grpPreview.Parent := pnlCenter;
-  grpPreview.SetBounds(382, 4, 496, 360);
+  grpPreview.SetBounds(382, 4, 456, 380);
   grpPreview.Anchors := [akLeft, akTop];
   grpPreview.Caption := ' Live Preview ';
 
@@ -580,53 +589,57 @@ begin
   imgPreview.Center := False;
 
   tmrPreview := TTimer.Create(Self);
-  tmrPreview.Interval := 30; // ~33 fps smooth preview
+  tmrPreview.Interval := 30; // restored ~33 fps poll
   tmrPreview.Enabled := False;
   tmrPreview.OnTimer := @PreviewTimer;
+  tmrPreviewRecovery := TTimer.Create(Self);
+  tmrPreviewRecovery.Interval := 200;
+  tmrPreviewRecovery.Enabled := False;
+  tmrPreviewRecovery.OnTimer := @PreviewRecoveryTimer;
 
   // === RIGHT: Presets + Log ===
   pnlRight := TPanel.Create(Self);
   pnlRight.Parent := Self;
   pnlRight.Align := alRight;
-  pnlRight.Width := 280;
+  pnlRight.Width := 310;
   pnlRight.BevelOuter := bvNone;
 
   grpPresets := TGroupBox.Create(Self);
   grpPresets.Parent := pnlRight;
-  grpPresets.SetBounds(4, 4, 272, 240);
+  grpPresets.SetBounds(4, 4, 302, 304);
   grpPresets.Caption := ' Preset Positions ';
 
   for i := 0 to 5 do
   begin
     edtPresetName[i] := TEdit.Create(Self);
     edtPresetName[i].Parent := grpPresets;
-    edtPresetName[i].SetBounds(8, 22 + i * 34, 100, 24);
+    edtPresetName[i].SetBounds(10, 30 + i * 42, 108, 30);
     edtPresetName[i].Text := Format('Preset %d', [i]);
 
-    btnPresetRecall[i] := MakeButton(grpPresets, 114, 20 + i * 34, 70, 28,
+    btnPresetRecall[i] := MakeButton(grpPresets, 124, 28 + i * 42, 78, 32,
       'Recall', @PresetRecallClick);
     btnPresetRecall[i].Tag := i;
 
-    btnPresetSave[i] := MakeButton(grpPresets, 190, 20 + i * 34, 70, 28,
+    btnPresetSave[i] := MakeButton(grpPresets, 208, 28 + i * 42, 80, 32,
       'Save', @PresetSaveClick);
     btnPresetSave[i].Tag := i;
   end;
 
   grpLog := TGroupBox.Create(Self);
   grpLog.Parent := pnlRight;
-  grpLog.SetBounds(4, 248, 272, 440);
+  grpLog.SetBounds(4, 316, 302, 500);
   grpLog.Caption := ' Activity Log ';
 
   memoLog := TMemo.Create(Self);
   memoLog.Parent := grpLog;
-  memoLog.SetBounds(4, 18, 264, 370);
+  memoLog.SetBounds(8, 28, 286, 410);
   memoLog.ReadOnly := True;
   memoLog.ScrollBars := ssVertical;
   memoLog.Font.Name := 'Monospace';
   memoLog.Font.Size := 8;
 
-  btnClearLog := MakeButton(grpLog, 4, 396, 80, 28, 'Clear Log', @ClearLogClick);
-  btnScanXU := MakeButton(grpLog, 90, 396, 80, 28, 'Read XU', @ScanXUClick);
+  btnClearLog := MakeButton(grpLog, 8, 448, 90, 32, 'Clear Log', @ClearLogClick);
+  btnScanXU := MakeButton(grpLog, 106, 448, 90, 32, 'Read XU', @ScanXUClick);
 end;
 
 { ===== Device Management ===== }
@@ -665,7 +678,7 @@ begin
   if FCam.Open(devpath) then
   begin
     lblStatus.Caption := 'Connected: ' + FCam.DeviceName;
-    lblStatus.Font.Color := clGreen;
+    lblStatus.Font.Color := RGBToColor(74, 222, 128);
     btnConnect.Enabled := False;
     btnDisconnect.Enabled := True;
     ReadCurrentValues;
@@ -683,13 +696,15 @@ end;
 
 procedure TfrmMain.DisconnectClick(Sender: TObject);
 begin
+  tmrPTZ.Enabled := False;
+  FPTZPanStep := 0; FPTZTiltStep := 0;
   StopPreview; // must stop streaming before the fd is closed
   tmrTrackingPoll.Enabled := False;
   btnTrackingOn.Font.Style := [];
   btnTrackingOn.Caption := 'ON';
   FCam.Close;
   lblStatus.Caption := 'Not connected';
-  lblStatus.Font.Color := clRed;
+  lblStatus.Font.Color := RGBToColor(248, 113, 113);
   btnConnect.Enabled := True;
   btnDisconnect.Enabled := False;
   UpdateUIState;
@@ -701,7 +716,6 @@ procedure TfrmMain.PTZMouseDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 var
   dirTag, panDir, tiltDir: Integer;
-  wasSpecial: Boolean;
 begin
   if not FCam.Connected then Exit;
 
@@ -709,19 +723,17 @@ begin
   // or triggering the camera's 10-second lost-target sleep timer
   if FCam.AITrackingEnabled or FCam.GetAITracking then
   begin
-    FCam.SetAITracking(False);
+    if not FCam.SetAITracking(False) then Exit;
     btnTrackingOn.Font.Style := [];
     btnTrackingOn.Caption := 'ON';
     btnTrackingOff.Font.Style := [];
     btnTrackingOff.Caption := 'OFF';
   end;
 
-  // If in any downward or special mode, turn it off and restore preview
-  wasSpecial := (FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard]);
-  if wasSpecial then
+  if FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
   begin
-    FCam.SetCameraMode(cmNormal);
-    WakeAndRestorePreview;
+    if not FCam.SetCameraMode(cmNormal) then Exit;
+    RestartPreview;
   end;
 
   dirTag := (Sender as TSpeedButton).Tag;
@@ -766,9 +778,10 @@ end;
 procedure TfrmMain.HomeClick(Sender: TObject);
 begin
   if not FCam.Connected then Exit;
-  FCam.SetCameraMode(cmNormal);
+  tmrPTZ.Enabled := False;
+  FPTZPanStep := 0; FPTZTiltStep := 0;
   FCam.GimbalReset;
-  WakeAndRestorePreview;
+  if FCapture.Streaming then RestartPreview else StartPreview;
 end;
 
 procedure TfrmMain.ZoomChange(Sender: TObject);
@@ -789,6 +802,7 @@ begin
   // the driver negotiates the nearest supported size/format.
   if FCapture.Start(FCam.FD, 1280, 720) then
   begin
+    FStallCount := 0;
     tmrPreview.Enabled := True;
     btnPreview.Caption := 'Stop Preview';
     lblPreviewInfo.Caption := Format('%dx%d %s',
@@ -797,11 +811,16 @@ begin
       [FCapture.Width, FCapture.Height, FourCCToStr(FCapture.PixFmt)]));
   end
   else
-    CamLog(Self, 'Preview FAILED to start (camera may be in use by another app)');
+  begin
+    CamLog(Self, 'Preview FAILED to start: ' + FCapture.LastError);
+    if FCapture.LastErrorCode <> ESysENODEV then RestartPreview;
+  end;
 end;
 
 procedure TfrmMain.StopPreview;
 begin
+  tmrPreviewRecovery.Enabled := False;
+  FPreviewRetry.Cancel;
   tmrPreview.Enabled := False;
   if FCapture.Streaming then
   begin
@@ -814,78 +833,97 @@ begin
     lblPreviewInfo.Caption := '';
 end;
 
-procedure TfrmMain.RestartPreview;
-begin
-  if not FCam.Connected then Exit;
-  FCapture.Stop;
-  Sleep(150);
-  if FCapture.Start(FCam.FD, 1280, 720) then
-  begin
-    FStallCount := 0;
-    tmrPreview.Enabled := True;
-    if Assigned(btnPreview) then
-      btnPreview.Caption := 'Stop Preview';
-    if Assigned(lblPreviewInfo) then
-      lblPreviewInfo.Caption := Format('%dx%d %s',
-        [FCapture.Width, FCapture.Height, FourCCToStr(FCapture.PixFmt)]);
-  end;
-end;
-
-procedure TfrmMain.WakeAndRestorePreview;
-begin
-  if not FCam.Connected then Exit;
-  if FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview')) then
-    RestartPreview;
-end;
-
 procedure TfrmMain.PreviewToggleClick(Sender: TObject);
 begin
-  if FCapture.Streaming then
+  if FCapture.Streaming or FPreviewRetry.Active then
     StopPreview
   else
     StartPreview;
 end;
 
+procedure TfrmMain.RestartPreview;
+begin
+  if not FCam.Connected then Exit;
+  tmrPreview.Enabled := False;
+  FCapture.Stop;
+  FStallCount := 0;
+  FPreviewRetry.BeginRecovery(GetTickCount64);
+  tmrPreviewRecovery.Enabled := True;
+  btnPreview.Caption := 'Stop Preview';
+  lblPreviewInfo.Caption := 'Waiting for camera; restarting preview...';
+end;
+
+procedure TfrmMain.PreviewRecoveryTimer(Sender: TObject);
+begin
+  if not FCam.Connected then
+  begin
+    StopPreview;
+    Exit;
+  end;
+  if FPreviewRetry.Due(GetTickCount64) then
+  begin
+    // Independent of capture/preview timer: failed starts must keep retrying.
+    tmrPreview.Enabled := False;
+    FCapture.Stop;
+    CamLog(Self, Format('Preview recovery attempt %d', [FPreviewRetry.Attempts]));
+    StartPreview;
+    // A successful STREAMON is not recovery until a frame actually arrives.
+  end;
+  if not FPreviewRetry.Active then
+  begin
+    StopPreview;
+    lblPreviewInfo.Caption := 'Preview could not recover; use Start Preview to retry';
+    CamLog(Self, 'Preview recovery stopped after five attempts');
+  end;
+end;
+
 procedure TfrmMain.PreviewTimer(Sender: TObject);
 begin
   if not FCapture.Streaming then Exit;
-  if FCapture.GrabFrame(imgPreview.Picture.Bitmap) then
+  if FCapture.GrabFrame(FPreviewBmp) then
   begin
     FStallCount := 0;
+    FPreviewRetry.Cancel;
+    tmrPreviewRecovery.Enabled := False;
+    imgPreview.Picture.Bitmap.Assign(FPreviewBmp);
     imgPreview.Invalidate;
   end
-  else
+  else Inc(FStallCount);
+  if FCapture.LastError <> '' then
   begin
-    // Don't repeatedly cycle stream while parked in downward overhead mode
-    if FCam.CurrentMode <> cmOverhead then
+    CamLog(Self, FCapture.LastError);
+    if FCapture.LastErrorCode = ESysENODEV then
     begin
-      Inc(FStallCount);
-      // If stream stalls for > 2 seconds (e.g. camera slept or mode changed), auto-restart
-      if FStallCount >= 65 then
-      begin
-        RestartPreview;
-        FStallCount := 0;
-      end;
-    end;
+      StopPreview;
+      lblPreviewInfo.Caption := 'Camera disconnected';
+    end
+    else RestartPreview;
+    Exit;
+  end;
+  if FStallCount >= 65 then
+  begin
+    CamLog(Self, 'Preview stalled; scheduling stream recovery');
+    RestartPreview;
   end;
 end;
 
 { ===== Mode Handlers ===== }
 
 procedure TfrmMain.TrackingOnClick(Sender: TObject);
-var
-  wasSpecial: Boolean;
 begin
   if not FCam.Connected then Exit;
-  wasSpecial := (FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard]);
-  FCam.SetAITracking(True);
-  if wasSpecial or FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview')) then
-    WakeAndRestorePreview;
-  // Sync framing combo with camera's current state
-  case FCam.GetTrackingFrame of
-    tfHead:     cboTrackFrame.ItemIndex := 0;
-    tfHalfBody: cboTrackFrame.ItemIndex := 1;
-    tfFullBody: cboTrackFrame.ItemIndex := 2;
+  if not FCam.SetAITracking(True) then Exit;
+  if FCapture.Streaming or FPreviewRetry.Active then RestartPreview;
+  // Sync framing combo with camera's current state without triggering event
+  FUpdating := True;
+  try
+    case FCam.GetTrackingFrame of
+      tfHead:     cboTrackFrame.ItemIndex := 0;
+      tfHalfBody: cboTrackFrame.ItemIndex := 1;
+      tfFullBody: cboTrackFrame.ItemIndex := 2;
+    end;
+  finally
+    FUpdating := False;
   end;
 end;
 
@@ -896,7 +934,7 @@ end;
 
 procedure TfrmMain.TrackFrameChange(Sender: TObject);
 begin
-  if not FCam.Connected then Exit;
+  if FUpdating or (not FCam.Connected) then Exit;
   case cboTrackFrame.ItemIndex of
     0: FCam.SetTrackingFrame(tfHead);
     1: FCam.SetTrackingFrame(tfHalfBody);
@@ -929,26 +967,25 @@ end;
 
 procedure TfrmMain.ModeButtonClick(Sender: TObject);
 var
-  wasPreviewing: Boolean;
+  wasStreaming: Boolean;
 begin
   if not FCam.Connected then Exit;
-  wasPreviewing := FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview'));
+  wasStreaming := FCapture.Streaming or FPreviewRetry.Active;
   case (Sender as TButton).Tag of
     0: FCam.SetCameraMode(cmNormal);
     1: FCam.SetCameraMode(cmDeskView);
     2: FCam.SetCameraMode(cmWhiteboard);
     3: FCam.SetCameraMode(cmOverhead);
   end;
-  if wasPreviewing then
-    WakeAndRestorePreview;
+  if wasStreaming then
+    RestartPreview
+  else if (Sender as TButton).Tag = 0 then
+    StartPreview;
 end;
 
 procedure TfrmMain.GimbalResetClick(Sender: TObject);
 begin
-  if not FCam.Connected then Exit;
-  FCam.SetCameraMode(cmNormal);
-  FCam.GimbalReset;
-  WakeAndRestorePreview;
+  HomeClick(Sender);
 end;
 
 { ===== Image Handlers ===== }
@@ -1022,16 +1059,14 @@ procedure TfrmMain.PresetRecallClick(Sender: TObject);
 var
   p: TPresetPosition;
   wasUpdating: Boolean;
-  wasSpecial: Boolean;
 begin
   if not FCam.Connected then Exit;
 
-  wasSpecial := (FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard]);
+  if FPresetDirty = [] then LoadLinkPresets(FCam);
   p := FCam.GetPreset((Sender as TButton).Tag);
   if not FCam.RecallPreset((Sender as TButton).Tag) then Exit;
 
-  if wasSpecial or FCapture.Streaming or (Assigned(btnPreview) and (btnPreview.Caption = 'Stop Preview')) then
-    WakeAndRestorePreview;
+  if FCapture.Streaming or FPreviewRetry.Active then RestartPreview;
 
   // Recall changes the camera directly, so mirror the recalled zoom in the UI
   // without firing ZoomChange and sending the same command a second time.
@@ -1046,10 +1081,14 @@ begin
 end;
 
 procedure TfrmMain.PresetSaveClick(Sender: TObject);
+var I: Integer;
 begin
-  if FCam.Connected and FCam.SavePreset((Sender as TButton).Tag) then
-    // Persist immediately so a saved preset survives a crash or forced exit.
+  I := (Sender as TButton).Tag;
+  if FCam.Connected and FCam.SavePreset(I) then
+  begin
+    Include(FPresetDirty, I);
     SaveSettings;
+  end;
 end;
 
 { ===== Log ===== }
@@ -1161,43 +1200,70 @@ begin
   grpPresets.Enabled := connected;
   btnPreview.Enabled := connected;
 
-  // Framing only works on Link 2
-  if connected and (FCam.CameraModel = cmLink) then
+  // Framing works on Link 2 and Link 2 Pro (not supported on original Link)
+  if connected then
   begin
-    cboTrackFrame.Visible := False;
-    lblTrackFrame.Caption := 'Framing: Link 2 only';
+    if FCam.CameraModel = cmLink then
+    begin
+      cboTrackFrame.Visible := False;
+      lblTrackFrame.Caption := 'Framing: Link 2 only';
+    end
+    else
+    begin
+      cboTrackFrame.Visible := True;
+      cboTrackFrame.Enabled := True;
+      lblTrackFrame.Caption := 'Framing:';
+    end;
   end
-  else if connected then
+  else
   begin
-    cboTrackFrame.Visible := True;
-    cboTrackFrame.Enabled := True;
-    lblTrackFrame.Caption := 'Framing:';
+    cboTrackFrame.Enabled := False;
   end;
 end;
 
 procedure TfrmMain.SaveSettings;
 var
-  ini: TIniFile;
-  i: Integer;
-  p: TPresetPosition;
+  Settings: TLinkSettings;
+  I: Integer;
+  P: TPresetPosition;
+  DevPath: string;
 begin
-  ForceDirectories(GetAppConfigDir(False));
-  ini := TIniFile.Create(GetAppConfigDir(False) + 'insta360link.ini');
+  DevPath := FCam.DevicePath;
+  if (DevPath = '') and (cboDevice.ItemIndex >= 0) then
+  begin
+    DevPath := cboDevice.Items[cboDevice.ItemIndex];
+    DevPath := Copy(DevPath, 1, Pos(' ', DevPath + ' ') - 1);
+  end;
   try
-    ini.WriteString('Device', 'LastDevice', FCam.DevicePath);
-    ini.WriteInteger('PTZ', 'PanStep', sePanStep.Value);
-    ini.WriteInteger('PTZ', 'TiltStep', seTiltStep.Value);
-    for i := 0 to 5 do
+    Settings := TLinkSettings.Create;
+    try
+      if DevPath <> '' then Settings.Ini.WriteString('Device','LastDevice',DevPath);
+      Settings.Ini.WriteInteger('PTZ','PanStep',sePanStep.Value);
+      Settings.Ini.WriteInteger('PTZ','TiltStep',seTiltStep.Value);
+      for I := 0 to 5 do
+      begin
+        if I in FPresetDirty then
+        begin
+          P := FCam.GetPreset(I);
+          // Preserve a name changed by another writer unless edited here.
+          if edtPresetName[I].Text = FLoadedNames[I] then
+            P.Name := Settings.Ini.ReadString('Presets','Name'+IntToStr(I),edtPresetName[I].Text)
+          else P.Name := edtPresetName[I].Text;
+          Settings.WritePreset(I,P);
+        end
+        else if edtPresetName[I].Text <> FLoadedNames[I] then
+          Settings.Ini.WriteString('Presets','Name'+IntToStr(I),edtPresetName[I].Text);
+      end;
+      Settings.Commit;
+      FPresetDirty := [];
+      for I := 0 to 5 do FLoadedNames[I] := edtPresetName[I].Text;
+    finally Settings.Free; end;
+  except
+    on E: Exception do
     begin
-      ini.WriteString('Presets', 'Name' + IntToStr(i), edtPresetName[i].Text);
-      p := FCam.GetPreset(i);
-      ini.WriteBool('Presets', 'Valid' + IntToStr(i), p.Valid);
-      ini.WriteInteger('Presets', 'Pan' + IntToStr(i), p.Pan);
-      ini.WriteInteger('Presets', 'Tilt' + IntToStr(i), p.Tilt);
-      ini.WriteInteger('Presets', 'Zoom' + IntToStr(i), p.Zoom);
+      CamLog(Self, 'Settings NOT saved: ' + E.Message);
+      ShowMessage('Settings could not be saved: ' + E.Message);
     end;
-  finally
-    ini.Free;
   end;
 end;
 
@@ -1208,7 +1274,8 @@ var
   i: Integer;
   p: TPresetPosition;
 begin
-  fn := GetAppConfigDir(False) + 'insta360link.ini';
+  fn := LinkConfigPath;
+  for i := 0 to 5 do FLoadedNames[i] := edtPresetName[i].Text;
   if not FileExists(fn) then Exit;
 
   ini := TIniFile.Create(fn);
@@ -1230,6 +1297,7 @@ begin
     begin
       edtPresetName[i].Text := ini.ReadString('Presets', 'Name' + IntToStr(i),
         'Preset ' + IntToStr(i));
+      FLoadedNames[i] := edtPresetName[i].Text;
       p.Name := edtPresetName[i].Text;
       p.Valid := ini.ReadBool('Presets', 'Valid' + IntToStr(i), False);
       p.Pan := ini.ReadInteger('Presets', 'Pan' + IntToStr(i), 0);

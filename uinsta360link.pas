@@ -142,10 +142,14 @@ type
     function XU_GetPadded(Selector: Byte; var Data: array of Byte): Boolean;
     function XU_SetMode(ModeID, ModeFlag: Byte): Boolean;
     procedure SetXU_UnitID(Value: Byte);
+    function ApplyPanTilt(Pan, Tilt: LongInt): Boolean;
+    function LeaveSpecialMode: Boolean;
 
   public
     constructor Create;
     destructor Destroy; override;
+
+    function ReadXUControl(Selector: Byte; var Data: array of Byte): Boolean;
 
     { Connection }
     function Open(const DevPath: string): Boolean;
@@ -264,6 +268,9 @@ type
     { Properties }
     property Connected: Boolean read FConnected;
     property CameraModel: TCameraModel read FCameraModel;
+    {$IFDEF CAMERA_TEST}
+    property TestCameraModel: TCameraModel write FCameraModel;
+    {$ENDIF}
     property DevicePath: string read FDevicePath;
     property DeviceName: string read FDeviceName;
     property DriverName: string read FDriverName;
@@ -318,6 +325,8 @@ procedure TInsta360Link.SetXU_UnitID(Value: Byte);
 begin
   FXU_UnitID := Value;
   FXU_UnitIDOverride := True;
+  FillChar(FXU_Lens, SizeOf(FXU_Lens), 0);
+  if FConnected then ScanXU_Selectors;
 end;
 
 destructor TInsta360Link.Destroy;
@@ -369,6 +378,8 @@ procedure TInsta360Link.CacheControlRanges;
 begin
   FPanRange := QueryControlRange(V4L2_CID_PAN_ABSOLUTE);
   FTiltRange := QueryControlRange(V4L2_CID_TILT_ABSOLUTE);
+  if FPanRange.Available then FPanPos := FPanRange.Current;
+  if FTiltRange.Available then FTiltPos := FTiltRange.Current;
   FZoomRange := QueryControlRange(V4L2_CID_ZOOM_ABSOLUTE);
   FFocusRange := QueryControlRange(V4L2_CID_FOCUS_ABSOLUTE);
   FBrightnessRange := QueryControlRange(V4L2_CID_BRIGHTNESS);
@@ -433,7 +444,7 @@ procedure TInsta360Link.ScanXU_Selectors;
 var
   sel: Integer;
   unitID: Integer;
-  units: array[0..2] of Integer = (9, 10, 11);
+  units: array[0..3] of Integer;
   u: Integer;
   lenBuf: array[0..1] of Byte;
   infoBuf: Byte;
@@ -443,9 +454,13 @@ var
   hexStr: string;
   j: Integer;
 begin
+  FillChar(FXU_Lens, SizeOf(FXU_Lens), 0);
+  units[0] := FXU_UnitID;
+  units[1] := 9; units[2] := 10; units[3] := 11;
   for u := 0 to High(units) do
   begin
     unitID := units[u];
+    if (u > 0) and (unitID = FXU_UnitID) then Continue;
     Log('--- Scanning XU unit %d ---', [unitID]);
     for sel := 1 to 20 do
     begin
@@ -497,16 +512,19 @@ procedure TInsta360Link.DumpAllXU;
 var
   sel: Integer;
   unitID: Integer;
-  units: array[0..2] of Integer = (9, 10, 11);
+  units: array[0..3] of Integer;
   u: Integer;
   dataBuf: array[0..511] of Byte;
   dataLen: Word;
   hexStr: string;
   j, showBytes: Integer;
 begin
+  units[0] := FXU_UnitID;
+  units[1] := 9; units[2] := 10; units[3] := 11;
   for u := 0 to High(units) do
   begin
     unitID := units[u];
+    if (u > 0) and (unitID = FXU_UnitID) then Continue;
     Log('--- Unit %d snapshot ---', [unitID]);
     for sel := 1 to 20 do
     begin
@@ -581,7 +599,8 @@ begin
     FillChar(buf^, expectedLen, 0);
     copyLen := Length(Data);
     if copyLen > expectedLen then copyLen := expectedLen;
-    Move(Data[0], buf^, copyLen);
+    if copyLen > 0 then
+      Move(Data[0], buf^, copyLen);
     Result := UVC_XU_SetCur(FFD, FXU_UnitID, Selector, buf, expectedLen);
   finally
     FreeMem(buf);
@@ -610,7 +629,8 @@ begin
     begin
       copyLen := Length(Data);
       if copyLen > expectedLen then copyLen := expectedLen;
-      Move(buf^, Data[0], copyLen);
+      if copyLen > 0 then
+        Move(buf^, Data[0], copyLen);
     end;
   finally
     FreeMem(buf);
@@ -642,9 +662,14 @@ var
   cap: Tv4l2_capability;
   vidName, pidStr: string;
   pidFile: TextFile;
+  caps: LongWord;
 begin
   Result := False;
   Close; // Close any previous connection
+  FillChar(FXU_Lens, SizeOf(FXU_Lens), 0);
+  FPanPos := 0; FTiltPos := 0;
+  FAITrackingEnabled := False;
+  FCurrentMode := cmNormal;
 
   FFD := V4L2_Open(DevPath);
   if FFD < 0 then
@@ -665,7 +690,19 @@ begin
     Log('Driver: %s  Bus: %s', [FDriverName, FBusInfo]);
   end
   else
-    Log('WARNING: QUERYCAP failed');
+  begin
+    Log('ERROR: Not a V4L2 device (%s)', [ErrInfo]);
+    Close;
+    Exit;
+  end;
+  caps := cap.capabilities;
+  if (caps and V4L2_CAP_DEVICE_CAPS) <> 0 then caps := cap.device_caps;
+  if (caps and V4L2_CAP_VIDEO_CAPTURE) = 0 then
+  begin
+    Log('ERROR: Device does not support video capture');
+    Close;
+    Exit;
+  end;
 
   FConnected := True;
 
@@ -710,8 +747,6 @@ begin
 
   // Cache all control ranges
   CacheControlRanges;
-
-  // Synchronize initial software position tracking with actual hardware position
   GetPanAbsolute;
   GetTiltAbsolute;
 
@@ -745,13 +780,10 @@ function TInsta360Link.SetPanAbsolute(Value: LongInt): Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
+  if not LeaveSpecialMode then Exit;
 
-  // If in any downward or special mode, turn it off first to wake the camera
-  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
-  begin
-    XU_SetMode(XU_MODE_OFF, 0);
-    FCurrentMode := cmNormal;
-  end;
+  // Ensure tilt position is current before combined call
+  GetTiltAbsolute;
 
   // Try individual set first (Link 1), fall back to combined (Link 2)
   Result := V4L2_SetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, Value);
@@ -769,10 +801,10 @@ end;
 
 function TInsta360Link.GetPanAbsolute: LongInt;
 var
-  val: LongInt;
+  v: LongInt;
 begin
-  if FConnected and V4L2_GetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, val) then
-    FPanPos := val;
+  if FConnected and V4L2_GetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, v) then
+    FPanPos := v;
   Result := FPanPos;
 end;
 
@@ -780,13 +812,10 @@ function TInsta360Link.SetTiltAbsolute(Value: LongInt): Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
+  if not LeaveSpecialMode then Exit;
 
-  // If in any downward or special mode, turn it off first to wake the camera
-  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
-  begin
-    XU_SetMode(XU_MODE_OFF, 0);
-    FCurrentMode := cmNormal;
-  end;
+  // Ensure pan position is current before combined call
+  GetPanAbsolute;
 
   Result := V4L2_SetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, Value);
   if not Result then
@@ -803,70 +832,72 @@ end;
 
 function TInsta360Link.GetTiltAbsolute: LongInt;
 var
-  val: LongInt;
+  v: LongInt;
 begin
-  if FConnected and V4L2_GetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, val) then
-    FTiltPos := val;
+  if FConnected and V4L2_GetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, v) then
+    FTiltPos := v;
   Result := FTiltPos;
+end;
+
+function TInsta360Link.LeaveSpecialMode: Boolean;
+begin
+  Result := True;
+  if not (FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard]) then Exit;
+  Result := XU_SetMode(XU_MODE_OFF, 0);
+  if Result then
+  begin
+    FCurrentMode := cmNormal;
+    FAITrackingEnabled := False;
+  end;
+end;
+
+function TInsta360Link.ApplyPanTilt(Pan, Tilt: LongInt): Boolean;
+var
+  panOK, tiltOK: Boolean;
+begin
+  Result := False;
+  if not FConnected then Exit;
+  if V4L2_SetPanTilt(FFD, Pan, Tilt) then
+  begin
+    FPanPos := Pan; FTiltPos := Tilt;
+    Exit(True);
+  end;
+  panOK := V4L2_SetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, Pan);
+  tiltOK := V4L2_SetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, Tilt);
+  if panOK then FPanPos := Pan;
+  if tiltOK then FTiltPos := Tilt;
+  Result := panOK and tiltOK;
+  if not Result then
+    Log('Pan/Tilt incomplete: pan=%s tilt=%s',
+      [BoolToStr(panOK, True), BoolToStr(tiltOK, True)]);
 end;
 
 function TInsta360Link.PanTiltRelative(PanDelta, TiltDelta: LongInt): Boolean;
 var
-  newPan, newTilt: LongInt;
-  minSafeTilt: LongInt;
+  newPan, newTilt: Int64;
+  minSafeTilt: Int64;
 begin
   Result := False;
   if not FConnected then Exit;
-
-  // If in any downward or special mode, turn it off first to wake the camera
-  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
-  begin
-    XU_SetMode(XU_MODE_OFF, 0);
-    FCurrentMode := cmNormal;
-  end;
-
-  // Always read actual current hardware positions first to avoid drift or jumping
+  if not LeaveSpecialMode then Exit;
   GetPanAbsolute;
   GetTiltAbsolute;
-
-  newPan := FPanPos + PanDelta * 3600;
-  newTilt := FTiltPos + TiltDelta * 3600;
-
-  // Clamp to range
+  // Restore degrees, not the device's minimum control increment.
+  newPan := Int64(FPanPos) + Int64(PanDelta) * 3600;
+  newTilt := Int64(FTiltPos) + Int64(TiltDelta) * 3600;
   if FPanRange.Available then
-  begin
-    if newPan < FPanRange.Min then newPan := FPanRange.Min;
-    if newPan > FPanRange.Max then newPan := FPanRange.Max;
-  end;
+    newPan := EnsureRange(newPan, Int64(FPanRange.Min), Int64(FPanRange.Max));
   if FTiltRange.Available then
   begin
-    // Prevent manual downward tilt from reaching the hardware privacy socket (-90 deg / -324000).
-    // Tilting all the way to -90 deg triggers the Insta360 hardware privacy switch, which powers
-    // down the sensor and halts video streaming. -252000 corresponds to ~-70 degrees down.
-    minSafeTilt := -252000;
-    if minSafeTilt < FTiltRange.Min then minSafeTilt := FTiltRange.Min;
-    if newTilt < minSafeTilt then newTilt := minSafeTilt;
-    if newTilt > FTiltRange.Max then newTilt := FTiltRange.Max;
+    // Restored October 31 privacy-stop guard: -70 degrees, above -90 park.
+    minSafeTilt := Max(Int64(FTiltRange.Min), Int64(-252000));
+    minSafeTilt := Min(minSafeTilt, Int64(FTiltRange.Max));
+    newTilt := EnsureRange(newTilt, minSafeTilt, Int64(FTiltRange.Max));
   end;
-
-  // Try combined set first (works on both Link and Link 2)
-  Result := V4L2_SetPanTilt(FFD, newPan, newTilt);
-  if not Result then
-  begin
-    // Fall back to individual sets (shouldn't happen, but just in case)
-    V4L2_SetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, newPan);
-    Result := V4L2_SetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, newTilt);
-  end;
-
-  if Result then
-  begin
-    Log('Pan/Tilt: pan=%d→%d tilt=%d→%d',
-        [FPanPos, newPan, FTiltPos, newTilt]);
-    FPanPos := newPan;
-    FTiltPos := newTilt;
-  end
-  else
-    Log('Pan/Tilt FAILED (%s)', [ErrInfo]);
+  if (newPan < Low(LongInt)) or (newPan > High(LongInt)) or
+     (newTilt < Low(LongInt)) or (newTilt > High(LongInt)) then Exit;
+  Result := ApplyPanTilt(LongInt(newPan), LongInt(newTilt));
+  if Result then Log('Pan/Tilt: pan=%d tilt=%d', [FPanPos, FTiltPos]);
 end;
 
 function TInsta360Link.PanTiltStop: Boolean;
@@ -889,40 +920,15 @@ begin
 end;
 
 function TInsta360Link.GimbalReset: Boolean;
-var
-  data: Byte;
 begin
   Result := False;
   if not FConnected then Exit;
-
-  // If in any downward or special mode, turn it off first to wake the camera
-  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
-  begin
-    XU_SetMode(XU_MODE_OFF, 0);
-    FCurrentMode := cmNormal;
-  end;
-
-  // Try XU reset command
-  data := 1;
-  XU_SetPadded(XU_GIMBAL_RESET_CONTROL, [data]);
-
-  // Set pan/tilt to 0,0 using combined set (works on both Link and Link 2)
-  Result := V4L2_SetPanTilt(FFD, 0, 0);
-  if not Result then
-  begin
-    // Fall back to individual sets
-    V4L2_SetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, 0);
-    Result := V4L2_SetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, 0);
-  end;
-
-  if Result then
-  begin
-    FPanPos := 0;
-    FTiltPos := 0;
-    Log('Gimbal reset to center');
-  end
-  else
-    Log('Gimbal reset FAILED');
+  if not LeaveSpecialMode then Exit;
+  // October 31 sequence: an accepted XU reset is not proof of centering.
+  XU_SetPadded(XU_GIMBAL_RESET_CONTROL, [1]);
+  Result := ApplyPanTilt(0, 0);
+  if Result then Log('Gimbal reset to center')
+  else Log('Gimbal reset FAILED');
 end;
 
 { ===== AI Tracking ===== }
@@ -1099,20 +1105,26 @@ end;
 { ===== Special Modes ===== }
 
 function TInsta360Link.SetCameraMode(Mode: TCameraMode): Boolean;
+var OffOK: Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
 
-  // First disable any active mode
-  XU_SetMode(XU_MODE_OFF, 0);
-  FAITrackingEnabled := False;
+  OffOK := XU_SetMode(XU_MODE_OFF, 0);
+  if OffOK then
+  begin
+    FAITrackingEnabled := False;
+    FCurrentMode := cmNormal;
+  end
+  else Log('Mode-off command failed');
 
   case Mode of
     cmNormal:
       begin
-        GimbalReset;
-        Result := True;
-        Log('Mode: Normal');
+        Result := OffOK;
+        // Preserve upstream Normal behavior: always return to center.
+        if not GimbalReset then Result := False;
+        if Result then Log('Mode: Normal');
       end;
     cmDeskView:   Result := SetDeskView(True);
     cmWhiteboard: Result := SetWhiteboard(True);
@@ -1142,7 +1154,10 @@ begin
       Log('DeskView: ENABLED');
     end
     else
+    begin
+      FCurrentMode := cmNormal;
       Log('DeskView: DISABLED');
+    end;
   end
   else
     Log('DeskView FAILED');
@@ -1167,7 +1182,10 @@ begin
       Log('Whiteboard: ENABLED');
     end
     else
+    begin
+      FCurrentMode := cmNormal;
       Log('Whiteboard: DISABLED');
+    end;
   end
   else
     Log('Whiteboard FAILED');
@@ -1192,7 +1210,10 @@ begin
       Log('Overhead: ENABLED');
     end
     else
+    begin
+      FCurrentMode := cmNormal;
       Log('Overhead: DISABLED');
+    end;
   end
   else
     Log('Overhead FAILED');
@@ -1252,10 +1273,16 @@ begin Result := 4000; if FConnected then V4L2_GetCtrl(FFD, V4L2_CID_WHITE_BALANC
 
 function TInsta360Link.SetExposureAuto(Enable: Boolean): Boolean;
 begin
+  Result := False;
+  if not FConnected then Exit;
   if Enable then
-    Result := FConnected and V4L2_SetCtrl(FFD, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_APERTURE_PRIORITY)
+  begin
+    Result := V4L2_SetCtrl(FFD, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_APERTURE_PRIORITY);
+    if not Result then
+      Result := V4L2_SetCtrl(FFD, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_AUTO);
+  end
   else
-    Result := FConnected and V4L2_SetCtrl(FFD, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
+    Result := V4L2_SetCtrl(FFD, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_MANUAL);
 end;
 
 function TInsta360Link.GetExposureAuto: Boolean;
@@ -1291,12 +1318,25 @@ begin
   if not FConnected then Exit;
   if Index > 5 then Exit;
 
-  // Software preset: use tracked positions for pan/tilt (V4L2 reads may be
-  // unreliable on some cameras like Link 2), read zoom directly
-  p := FPanPos;
-  t := FTiltPos;
-  z := 100;
-  V4L2_GetCtrl(FFD, V4L2_CID_ZOOM_ABSOLUTE, z);
+  if FCameraModel in [cmLink2, cmLink2Pro] then
+  begin
+    // Restore the known Link 2 workaround: successful reads may be stale.
+    p := FPanPos;
+    t := FTiltPos;
+    Log('Preset uses last commanded pan/tilt; tracking movement is not captured');
+  end
+  else if not V4L2_GetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, p) or
+          not V4L2_GetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, t) then
+  begin
+    Log('Preset NOT saved: current position could not be read');
+    Exit;
+  end;
+  if not V4L2_GetCtrl(FFD, V4L2_CID_ZOOM_ABSOLUTE, z) then
+  begin
+    Log('Preset NOT saved: zoom could not be read');
+    Exit;
+  end;
+  FPanPos := p; FTiltPos := t;
   FPresets[Index].Pan := p;
   FPresets[Index].Tilt := t;
   FPresets[Index].Zoom := z;
@@ -1306,9 +1346,12 @@ begin
 end;
 
 function TInsta360Link.RecallPreset(Index: Byte): Boolean;
+var
+  ptOK, zoomOK: Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
+  if not LeaveSpecialMode then Exit;
   if Index > 5 then Exit;
   if not FPresets[Index].Valid then
   begin
@@ -1316,25 +1359,9 @@ begin
     Exit;
   end;
 
-  // If in any downward or special mode, turn it off first to wake the camera
-  if FCurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
-  begin
-    XU_SetMode(XU_MODE_OFF, 0);
-    FCurrentMode := cmNormal;
-  end;
-
-  // Software preset: restore saved pan/tilt/zoom
-  // Use combined set for Link 2 compatibility
-  Result := V4L2_SetPanTilt(FFD, FPresets[Index].Pan, FPresets[Index].Tilt);
-  if not Result then
-  begin
-    V4L2_SetCtrl(FFD, V4L2_CID_PAN_ABSOLUTE, FPresets[Index].Pan);
-    V4L2_SetCtrl(FFD, V4L2_CID_TILT_ABSOLUTE, FPresets[Index].Tilt);
-    Result := True; // Best effort
-  end;
-  V4L2_SetCtrl(FFD, V4L2_CID_ZOOM_ABSOLUTE, FPresets[Index].Zoom);
-  FPanPos := FPresets[Index].Pan;
-  FTiltPos := FPresets[Index].Tilt;
+  ptOK := ApplyPanTilt(FPresets[Index].Pan, FPresets[Index].Tilt);
+  zoomOK := SetZoom(FPresets[Index].Zoom);
+  Result := ptOK and zoomOK;
   if Result then
     Log('Preset %d RECALLED: pan=%d tilt=%d zoom=%d',
         [Index, FPresets[Index].Pan, FPresets[Index].Tilt, FPresets[Index].Zoom])
@@ -1344,7 +1371,11 @@ end;
 
 function TInsta360Link.GetPreset(Index: Byte): TPresetPosition;
 begin
-  Result := Default(TPresetPosition);
+  Result.Name := '';
+  Result.Pan := 0;
+  Result.Tilt := 0;
+  Result.Zoom := 0;
+  Result.Valid := False;
   if Index <= 5 then
     Result := FPresets[Index];
 end;
@@ -1361,58 +1392,115 @@ function TInsta360Link.EnumerateControls: TStringList;
 var
   qc: Tv4l2_queryctrl;
   val: LongInt;
+  hasControls: Boolean;
 begin
   Result := TStringList.Create;
   if not FConnected then Exit;
 
-  // Iterate through user controls
-  qc.id := V4L2_CID_BASE;
-  while qc.id < V4L2_CID_BASE + 100 do
+  // Use V4L2_CTRL_FLAG_NEXT_CTRL to query all controls dynamically
+  hasControls := False;
+  FillChar(qc, SizeOf(qc), 0);
+  qc.id := V4L2_CTRL_FLAG_NEXT_CTRL;
+  while V4L2_QueryCtrl(FFD, qc) do
   begin
-    if V4L2_QueryCtrl(FFD, qc) then
+    hasControls := True;
+    if (qc.flags and V4L2_CTRL_FLAG_DISABLED) = 0 then
     begin
-      if (qc.flags and V4L2_CTRL_FLAG_DISABLED) = 0 then
-      begin
-        V4L2_GetCtrl(FFD, qc.id, val);
-        Result.Add(Format('%-30s: val=%d  min=%d  max=%d  step=%d  def=%d',
-          [PAnsiChar(@qc.name[0]), val, qc.minimum, qc.maximum,
-           qc.step, qc.default_value]));
-      end;
+      val := 0;
+      V4L2_GetCtrl(FFD, qc.id, val);
+      Result.Add(Format('%-30s: val=%d  min=%d  max=%d  step=%d  def=%d',
+        [PAnsiChar(@qc.name[0]), val, qc.minimum, qc.maximum,
+         qc.step, qc.default_value]));
     end;
-    Inc(qc.id);
+    qc.id := qc.id or V4L2_CTRL_FLAG_NEXT_CTRL;
   end;
 
-  // Camera class controls
-  qc.id := V4L2_CID_CAMERA_CLASS_BASE;
-  while qc.id < V4L2_CID_CAMERA_CLASS_BASE + 50 do
+  // Fallback for older drivers that don't support V4L2_CTRL_FLAG_NEXT_CTRL
+  if not hasControls then
   begin
-    if V4L2_QueryCtrl(FFD, qc) then
+    qc.id := V4L2_CID_BASE;
+    while qc.id < V4L2_CID_BASE + 100 do
     begin
-      if (qc.flags and V4L2_CTRL_FLAG_DISABLED) = 0 then
+      if V4L2_QueryCtrl(FFD, qc) then
       begin
-        V4L2_GetCtrl(FFD, qc.id, val);
-        Result.Add(Format('%-30s: val=%d  min=%d  max=%d  step=%d  def=%d',
-          [PAnsiChar(@qc.name[0]), val, qc.minimum, qc.maximum,
-           qc.step, qc.default_value]));
+        if (qc.flags and V4L2_CTRL_FLAG_DISABLED) = 0 then
+        begin
+          val := 0;
+          V4L2_GetCtrl(FFD, qc.id, val);
+          Result.Add(Format('%-30s: val=%d  min=%d  max=%d  step=%d  def=%d',
+            [PAnsiChar(@qc.name[0]), val, qc.minimum, qc.maximum,
+             qc.step, qc.default_value]));
+        end;
       end;
+      Inc(qc.id);
     end;
-    Inc(qc.id);
+
+    qc.id := V4L2_CID_CAMERA_CLASS_BASE;
+    while qc.id < V4L2_CID_CAMERA_CLASS_BASE + 50 do
+    begin
+      if V4L2_QueryCtrl(FFD, qc) then
+      begin
+        if (qc.flags and V4L2_CTRL_FLAG_DISABLED) = 0 then
+        begin
+          val := 0;
+          V4L2_GetCtrl(FFD, qc.id, val);
+          Result.Add(Format('%-30s: val=%d  min=%d  max=%d  step=%d  def=%d',
+            [PAnsiChar(@qc.name[0]), val, qc.minimum, qc.maximum,
+             qc.step, qc.default_value]));
+        end;
+      end;
+      Inc(qc.id);
+    end;
   end;
 end;
 
 function TInsta360Link.RawXU_Set(Selector: Byte; const Data: array of Byte): Boolean;
 var
-  buf: array of Byte;
-  i: Integer;
+  expectedLen, sendLen: Word;
+  buf: PByte;
+  copyLen: Integer;
 begin
-  SetLength(buf, Length(Data));
-  for i := 0 to High(Data) do
-    buf[i] := Data[i];
-  Result := UVC_XU_SetCur(FFD, FXU_UnitID, Selector, @buf[0], Length(Data));
+  Result := False;
+  if not FConnected then Exit;
+  copyLen := Length(Data);
+  if (Selector = 0) or (copyLen = 0) or (copyLen > High(Word)) then Exit;
+  if (Selector >= 1) and (Selector <= 20) then
+    expectedLen := FXU_Lens[Selector]
+  else
+    expectedLen := 0;
+
+  if expectedLen > 0 then
+    sendLen := expectedLen
+  else
+    sendLen := copyLen;
+
+  if sendLen = 0 then Exit;
+
+  buf := GetMem(sendLen);
+  try
+    FillChar(buf^, sendLen, 0);
+    if copyLen > sendLen then copyLen := sendLen;
+    if copyLen > 0 then
+      Move(Data[0], buf^, copyLen);
+    Result := UVC_XU_SetCur(FFD, FXU_UnitID, Selector, buf, sendLen);
+  finally
+    FreeMem(buf);
+  end;
+end;
+
+function TInsta360Link.ReadXUControl(Selector: Byte; var Data: array of Byte): Boolean;
+begin
+  Result := False;
+  if not FConnected or (Length(Data) = 0) then Exit;
+  FillChar(Data[0], Length(Data), 0);
+  Result := XU_GetPadded(Selector, Data);
 end;
 
 function TInsta360Link.RawXU_Get(Selector: Byte; var Data: array of Byte; Len: Word): Boolean;
 begin
+  Result := False;
+  if not FConnected or (Selector = 0) or (Len = 0) or
+     (Len > Length(Data)) then Exit;
   Result := UVC_XU_GetCur(FFD, FXU_UnitID, Selector, @Data[0], Len);
 end;
 

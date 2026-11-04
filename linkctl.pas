@@ -59,7 +59,7 @@ program linkctl;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, Classes, uv4l2, uinsta360link;
+  SysUtils, Classes, IniFiles, uv4l2, uinsta360link, ulinksettings;
 
 type
   { TInsta360Link.OnLog is a 'procedure ... of object' event, so the callback
@@ -89,9 +89,9 @@ begin
   WriteLn('  -v               Verbose output');
   WriteLn;
   WriteLn('PTZ Commands:');
-  WriteLn('  pan <value>         Set absolute pan (-36000..36000)');
+  WriteLn('  pan <value>         Set absolute pan');
   WriteLn('  tilt <value>        Set absolute tilt');
-  WriteLn('  move <px> <ty>      Relative pan/tilt (-30..30 each)');
+  WriteLn('  move <px> <ty>      Relative pan/tilt');
   WriteLn('  zoom <value>        Set zoom (100=1x to 400=4x)');
   WriteLn('  home                Reset gimbal to center');
   WriteLn;
@@ -101,6 +101,7 @@ begin
   WriteLn('  deskview on|off     DeskView (split desk + face)');
   WriteLn('  whiteboard on|off   Whiteboard mode');
   WriteLn('  overhead on|off     Overhead document view');
+  WriteLn('  normal              Reset to normal operating mode');
   WriteLn;
   WriteLn('Image Commands:');
   WriteLn('  brightness <val>    Set brightness');
@@ -114,10 +115,44 @@ begin
   WriteLn('  backlight on|off    Backlight compensation');
   WriteLn;
   WriteLn('Other Commands:');
+  WriteLn('  get <control_name>  Get control value (e.g. pan, tilt, zoom, brightness, tracking)');
   WriteLn('  list                List video devices');
   WriteLn('  info                Show camera info + all controls');
   WriteLn('  preset save|recall <0-5>');
   WriteLn('  xu <selector> <hex_bytes...>   Raw XU command');
+end;
+
+function SavePresetToDisk(ACam: TInsta360Link; Index: Integer): Boolean;
+var Settings: TLinkSettings; P: TPresetPosition;
+begin
+  Result := False;
+  try
+    Settings := TLinkSettings.Create;
+    try
+      P := ACam.GetPreset(Index);
+      P.Name := Settings.Ini.ReadString('Presets', 'Name'+IntToStr(Index), P.Name);
+      Settings.WritePreset(Index, P);
+      Settings.Commit;
+      Result := True;
+    finally Settings.Free; end;
+  except
+    on E: Exception do WriteLn(StdErr, 'ERROR: Could not save preset: ', E.Message);
+  end;
+end;
+
+function ParseHexByte(const S: string): Byte;
+var
+  CleanS: string;
+  val: LongInt;
+begin
+  CleanS := Trim(S);
+  if (Length(CleanS) >= 2) and (CleanS[1] = '0') and ((CleanS[2] = 'x') or (CleanS[2] = 'X')) then
+    CleanS := '$' + Copy(CleanS, 3, Length(CleanS) - 2)
+  else if (Length(CleanS) >= 1) and (CleanS[1] <> '$') then
+    CleanS := '$' + CleanS;
+  if not TryStrToInt(CleanS, val) or (val < 0) or (val > 255) then
+    raise EConvertError.Create('Invalid hex byte: ' + S);
+  Result := Byte(val);
 end;
 
 procedure TConsoleLog.Handle(Sender: TObject; const Msg: string);
@@ -201,12 +236,69 @@ begin
   Result := Cam.Open(DevicePath);
   if not Result then
   begin
-    WriteLn('ERROR: Cannot open ', DevicePath);
+    WriteLn(StdErr, 'ERROR: Cannot open video capture device ', DevicePath);
     WriteLn('Try running with sudo or check device permissions.');
     Cam.Free;
   end
-  else if not Verbose then
-    WriteLn('Connected: ', Cam.DeviceName, ' (', DevicePath, ')');
+  else
+  begin
+    LoadLinkPresets(Cam);
+    if not Verbose then
+      WriteLn('Connected: ', Cam.DeviceName, ' (', DevicePath, ')');
+  end;
+end;
+
+function PrintControl(const Name: string): Boolean;
+var
+  Data: array[0..51] of Byte;
+  A, B: Boolean;
+  function ReadValue(ID: LongWord; const LabelText: string): Boolean;
+  var V: LongInt;
+  begin
+    Result := V4L2_GetCtrl(Cam.FD, ID, V);
+    if Result then WriteLn(LabelText, ': ', V);
+  end;
+begin
+  Result := False;
+  case Name of
+    'pan': Result := ReadValue(V4L2_CID_PAN_ABSOLUTE, 'Pan');
+    'tilt': Result := ReadValue(V4L2_CID_TILT_ABSOLUTE, 'Tilt');
+    'zoom': Result := ReadValue(V4L2_CID_ZOOM_ABSOLUTE, 'Zoom');
+    'brightness': Result := ReadValue(V4L2_CID_BRIGHTNESS, 'Brightness');
+    'contrast': Result := ReadValue(V4L2_CID_CONTRAST, 'Contrast');
+    'saturation': Result := ReadValue(V4L2_CID_SATURATION, 'Saturation');
+    'sharpness': Result := ReadValue(V4L2_CID_SHARPNESS, 'Sharpness');
+    'gain': Result := ReadValue(V4L2_CID_GAIN, 'Gain');
+    'backlight': Result := ReadValue(V4L2_CID_BACKLIGHT_COMPENSATION, 'Backlight');
+    'wb': begin
+      A := ReadValue(V4L2_CID_AUTO_WHITE_BALANCE, 'Auto white balance');
+      B := ReadValue(V4L2_CID_WHITE_BALANCE_TEMPERATURE, 'White balance temperature');
+      Result := A and B;
+    end;
+    'exposure': begin
+      A := ReadValue(V4L2_CID_EXPOSURE_AUTO, 'Exposure mode');
+      B := ReadValue(V4L2_CID_EXPOSURE_ABSOLUTE, 'Exposure');
+      Result := A and B;
+    end;
+    'focus': begin
+      A := ReadValue(V4L2_CID_FOCUS_AUTO, 'Auto focus');
+      B := ReadValue(V4L2_CID_FOCUS_ABSOLUTE, 'Focus');
+      Result := A and B;
+    end;
+    'tracking': begin
+      Result := Cam.ReadXUControl(XU_MODE_CONTROL, Data);
+      if Result then WriteLn('Tracking: ', Data[0] = XU_MODE_AI_TRACKING);
+    end;
+    'frame': begin
+      Result := Cam.ReadXUControl(XU_TRACKING_FRAME_CONTROL, Data);
+      if Result then
+        case Data[0] of
+          XU_FRAME_HEAD: WriteLn('Frame: head');
+          XU_FRAME_HALF_BODY: WriteLn('Frame: half');
+          XU_FRAME_FULL_BODY: WriteLn('Frame: full');
+        else Result := False; end;
+    end;
+  end;
 end;
 
 procedure DoInfo;
@@ -244,7 +336,7 @@ begin
 end;
 
 var
-  i, j, argIdx: Integer;
+  i, j, argIdx, expectedArgs: Integer;
   cmd: string;
   ok: Boolean;
   sel: Byte;
@@ -254,16 +346,16 @@ begin
   XUnitID := -1;
   Verbose := False;
   ConsoleLog := TConsoleLog.Create;
-  try
-    if ParamCount = 0 then
-    begin
-      ShowHelp;
-      Exit;
-    end;
+
+  if ParamCount = 0 then
+  begin
+    ShowHelp;
+    Exit;
+  end;
 
   // Parse options
   argIdx := 1;
-  while (argIdx <= ParamCount) and (ParamStr(argIdx)[1] = '-') do
+  while (argIdx <= ParamCount) and (Length(ParamStr(argIdx)) > 0) and (ParamStr(argIdx)[1] = '-') do
   begin
     case ParamStr(argIdx) of
       '-d': begin
@@ -295,6 +387,41 @@ begin
   cmd := LowerCase(ParamStr(argIdx));
   Inc(argIdx);
 
+  // Validate the entire command before opening a device.
+  case cmd of
+    'list', 'info', 'help', 'home', 'normal': expectedArgs := 0;
+    'move', 'preset': expectedArgs := 2;
+    'xu': expectedArgs := -1;
+    'pan', 'tilt', 'zoom', 'tracking', 'frame', 'deskview', 'whiteboard',
+    'overhead', 'brightness', 'contrast', 'saturation', 'sharpness', 'gain',
+    'backlight', 'wb', 'exposure', 'focus', 'get': expectedArgs := 1;
+  else UsageError('unknown command: ' + cmd);
+  end;
+  if (expectedArgs >= 0) and (ParamCount - argIdx + 1 <> expectedArgs) then
+    UsageError(cmd + ' expects ' + IntToStr(expectedArgs) + ' argument(s)');
+  if (cmd = 'wb') or (cmd = 'exposure') or (cmd = 'focus') then
+    if LowerCase(ParamStr(argIdx)) <> 'auto' then
+      if not TryStrToInt(ParamStr(argIdx), i) or (i < 0) then
+        UsageError(cmd + ' expects auto or a nonnegative integer');
+  if (cmd = 'frame') and (LowerCase(ParamStr(argIdx)) <> 'head') and
+     (LowerCase(ParamStr(argIdx)) <> 'half') and
+     (LowerCase(ParamStr(argIdx)) <> 'full') then UsageError('frame expects head|half|full');
+  if cmd = 'get' then
+    case LowerCase(ParamStr(argIdx)) of
+      'brightness','contrast','saturation','sharpness','gain','pan','tilt',
+      'zoom','wb','exposure','focus','backlight','tracking','frame': ;
+    else UsageError('unknown control: ' + ParamStr(argIdx)); end;
+  if cmd = 'xu' then
+  begin
+    if not TryStrToInt(ParamStr(argIdx), i) or (i < 1) or (i > 255) then
+      UsageError('xu selector must be from 1 to 255');
+    if ParamCount - argIdx > High(Word) then UsageError('too many XU bytes');
+    for j := argIdx + 1 to ParamCount do
+      try
+        ParseHexByte(ParamStr(j));
+      except on E: EConvertError do UsageError(E.Message); end;
+  end;
+
   // Validate command arguments before opening the camera. ParamStr returns an
   // empty string for missing arguments, which previously turned into unsafe
   // default values such as pan=0 or zoom=100.
@@ -304,6 +431,8 @@ begin
     UsageError('preset requires save|recall <0-5>')
   else if (cmd = 'xu') and (argIdx + 1 > ParamCount) then
     UsageError('xu requires <selector> <hex_byte> [hex_byte...]')
+  else if (cmd = 'get') and (argIdx > ParamCount) then
+    UsageError('get requires <control_name>')
   else if (cmd = 'pan') or (cmd = 'tilt') or (cmd = 'zoom') or
           (cmd = 'tracking') or (cmd = 'frame') or (cmd = 'deskview') or
           (cmd = 'whiteboard') or (cmd = 'overhead') or
@@ -354,7 +483,12 @@ begin
   end;
 
   // All other commands need a connection
-  if not ConnectCamera then Exit;
+  if not ConnectCamera then
+  begin
+    ExitCode := 1;
+    ConsoleLog.Free;
+    Exit;
+  end;
 
   try
     ok := False;
@@ -414,8 +548,8 @@ begin
         ok := Cam.SetAutoWhiteBalance(True)
       else
       begin
-        Cam.SetAutoWhiteBalance(False);
-        ok := Cam.SetWhiteBalanceTemp(StrToIntDef(ParamStr(argIdx), 4000));
+        ok := Cam.SetAutoWhiteBalance(False);
+        if ok then ok := Cam.SetWhiteBalanceTemp(StrToInt(ParamStr(argIdx)));
       end;
     end
     else if cmd = 'exposure' then
@@ -424,8 +558,8 @@ begin
         ok := Cam.SetExposureAuto(True)
       else
       begin
-        Cam.SetExposureAuto(False);
-        ok := Cam.SetExposureAbsolute(StrToIntDef(ParamStr(argIdx), 250));
+        ok := Cam.SetExposureAuto(False);
+        if ok then ok := Cam.SetExposureAbsolute(StrToInt(ParamStr(argIdx)));
       end;
     end
     else if cmd = 'focus' then
@@ -434,16 +568,27 @@ begin
         ok := Cam.SetAutoFocus(True)
       else
       begin
-        Cam.SetAutoFocus(False);
-        ok := Cam.SetFocusAbsolute(StrToIntDef(ParamStr(argIdx), 0));
+        ok := Cam.SetAutoFocus(False);
+        if ok then ok := Cam.SetFocusAbsolute(StrToInt(ParamStr(argIdx)));
       end;
     end
+
+    // ===== Get Control =====
+    else if cmd = 'get' then
+      ok := PrintControl(LowerCase(ParamStr(argIdx)))
 
     // ===== Presets =====
     else if cmd = 'preset' then
     begin
       if LowerCase(ParamStr(argIdx)) = 'save' then
-        ok := Cam.SavePreset(StrToIntDef(ParamStr(argIdx + 1), 0))
+      begin
+        ok := Cam.SavePreset(StrToIntDef(ParamStr(argIdx + 1), 0));
+        if ok then
+        begin
+          ok := SavePresetToDisk(Cam, StrToInt(ParamStr(argIdx + 1)));
+          if ok then WriteLn('Preset ', ParamStr(argIdx + 1), ' saved to config');
+        end;
+      end
       else if LowerCase(ParamStr(argIdx)) = 'recall' then
         ok := Cam.RecallPreset(StrToIntDef(ParamStr(argIdx + 1), 0))
       else
@@ -453,16 +598,21 @@ begin
     // ===== Raw XU =====
     else if cmd = 'xu' then
     begin
-      if argIdx < ParamCount then
+      if argIdx <= ParamCount then
       begin
         sel := StrToIntDef(ParamStr(argIdx), 0);
         Inc(argIdx);
-        SetLength(data, ParamCount - argIdx + 1);
-        for i := 0 to High(data) do
-          data[i] := StrToIntDef('$' + ParamStr(argIdx + i), 0);
-        ok := Cam.RawXU_Set(sel, data);
-        if ok then WriteLn('XU command sent OK')
-        else WriteLn('XU command FAILED');
+        if argIdx <= ParamCount then
+        begin
+          SetLength(data, ParamCount - argIdx + 1);
+          for i := 0 to High(data) do
+            data[i] := ParseHexByte(ParamStr(argIdx + i));
+          ok := Cam.RawXU_Set(sel, data);
+          if ok then WriteLn('XU command sent OK')
+          else WriteLn('XU command FAILED');
+        end
+        else
+          UsageError('xu requires data bytes');
       end;
     end
 
@@ -480,14 +630,15 @@ begin
 
     if ok then
       WriteLn('OK')
-    else if (cmd <> 'info') and (cmd <> 'list') then
-      WriteLn('Command may have failed. Try running with -v for details.');
+    else
+    begin
+      ExitCode := 1;
+      WriteLn(StdErr, 'ERROR: Command failed. Run with -v for details.');
+    end;
 
   finally
     Cam.Close;
     Cam.Free;
-  end;
-  finally
     ConsoleLog.Free;
   end;
 end.

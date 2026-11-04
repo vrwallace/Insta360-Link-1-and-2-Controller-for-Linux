@@ -1,7 +1,6 @@
 # udev rule to allow non-root users to access Insta360 Link webcam
 # Install: sudo cp 99-insta360-link.rules /etc/udev/rules.d/
 # Reload: sudo udevadm control --reload-rules && sudo udevadm trigger
-#
 # Insta360 Link:       VID=2e1a PID=4c01
 # Insta360 Link 2:     VID=2e1a PID=4c04
 # Insta360 Link 2 Pro: VID=2e1a PID=4c06

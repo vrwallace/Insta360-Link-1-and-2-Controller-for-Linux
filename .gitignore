@@ -1,0 +1,8 @@
+*.o
+*.ppu
+*.or
+*.compiled
+*.bak
+lib/
+insta360linkgui
+linkctl

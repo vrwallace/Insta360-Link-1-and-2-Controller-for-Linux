@@ -19,6 +19,13 @@ interface
 uses
   BaseUnix, Unix, SysUtils;
 
+{ Central ioctl boundary. Injection is compiled only in the regression build. }
+{$IFDEF CAMERA_TEST}
+type TCameraIoctlHook = function(fd: cint; Request: LongWord; Data: Pointer): cint;
+var CameraIoctlHook: TCameraIoctlHook = nil;
+{$ENDIF}
+function CameraIoctl(fd: cint; Request: LongWord; Data: Pointer): cint;
+
 { ===== ioctl helpers ===== }
 const
   _IOC_NRBITS   = 8;
@@ -38,11 +45,6 @@ function _IOC(dir, ioctype, nr, size: LongWord): LongWord; inline;
 { ===== V4L2 ioctl type ===== }
 const
   VIDIOC_TYPE = Ord('V');
-
-{ ===== V4L2 capability flags ===== }
-const
-  V4L2_CAP_VIDEO_CAPTURE = $00000001;
-  V4L2_CAP_DEVICE_CAPS   = $80000000;
 
 { ===== V4L2 User-class control IDs (base $00980900) ===== }
 const
@@ -105,6 +107,11 @@ const
   V4L2_CTRL_FLAG_WRITE_ONLY = $0040;
   V4L2_CTRL_FLAG_VOLATILE   = $0080;
   V4L2_CTRL_FLAG_NEXT_CTRL  = $80000000;
+
+{ Capability flags }
+const
+  V4L2_CAP_VIDEO_CAPTURE    = $00000001;
+  V4L2_CAP_DEVICE_CAPS      = $80000000;
 
 { ===== UVC Extension Unit (XU) ioctl constants ===== }
 
@@ -291,6 +298,14 @@ implementation
 uses
   Classes;
 
+function CameraIoctl(fd: cint; Request: LongWord; Data: Pointer): cint;
+begin
+  {$IFDEF CAMERA_TEST}
+  if Assigned(CameraIoctlHook) then Exit(CameraIoctlHook(fd, Request, Data));
+  {$ENDIF}
+  Result := FpIOCtl(fd, Request, Data);
+end;
+
 function _IOC(dir, ioctype, nr, size: LongWord): LongWord; inline;
 begin
   Result := (dir shl _IOC_DIRSHIFT) or
@@ -344,12 +359,12 @@ end;
 function V4L2_QueryCap(fd: cint; out cap: Tv4l2_capability): Boolean;
 begin
   FillChar(cap, SizeOf(cap), 0);
-  Result := (FpIOCtl(fd, VIDIOC_QUERYCAP, @cap) = 0);
+  Result := (CameraIoctl(fd, VIDIOC_QUERYCAP, @cap) = 0);
 end;
 
 function V4L2_QueryCtrl(fd: cint; var qc: Tv4l2_queryctrl): Boolean;
 begin
-  Result := (FpIOCtl(fd, VIDIOC_QUERYCTRL, @qc) = 0);
+  Result := (CameraIoctl(fd, VIDIOC_QUERYCTRL, @qc) = 0);
 end;
 
 function V4L2_GetCtrl(fd: cint; CtrlID: LongWord; out Value: LongInt): Boolean;
@@ -358,7 +373,7 @@ var
 begin
   c.id := CtrlID;
   c.value := 0;
-  Result := (FpIOCtl(fd, VIDIOC_G_CTRL, @c) = 0);
+  Result := (CameraIoctl(fd, VIDIOC_G_CTRL, @c) = 0);
   if Result then Value := c.value;
 end;
 
@@ -368,7 +383,7 @@ var
 begin
   c.id := CtrlID;
   c.value := Value;
-  Result := (FpIOCtl(fd, VIDIOC_S_CTRL, @c) = 0);
+  Result := (CameraIoctl(fd, VIDIOC_S_CTRL, @c) = 0);
 end;
 
 function V4L2_SetPanTilt(fd: cint; Pan, Tilt: LongInt): Boolean;
@@ -390,7 +405,7 @@ begin
   ctrls.request_fd := -1;
   ctrls.controls := @ext[0];
 
-  Result := (FpIOCtl(fd, VIDIOC_S_EXT_CTRLS, @ctrls) = 0);
+  Result := (CameraIoctl(fd, VIDIOC_S_EXT_CTRLS, @ctrls) = 0);
 end;
 
 function UVC_XU_Query(fd: cint; UnitID, Selector, QueryType: Byte;
@@ -404,7 +419,7 @@ begin
   q.query := QueryType;
   q.size := DataSize;
   q.data := Data;
-  Result := (FpIOCtl(fd, UVCIOC_CTRL_QUERY, @q) = 0);
+  Result := (CameraIoctl(fd, UVCIOC_CTRL_QUERY, @q) = 0);
 end;
 
 function UVC_XU_SetCur(fd: cint; UnitID, Selector: Byte;
@@ -426,40 +441,51 @@ var
   fd: cint;
   devpath: string;
   caps: LongWord;
+  rawDevs: TStringList;
+  i: Integer;
 begin
   Count := 0;
   FillChar(cap, SizeOf(cap), 0);
-  if FindFirst('/dev/video*', faAnyFile, SR) = 0 then
-  begin
-    repeat
-      devpath := '/dev/' + SR.Name;
+  rawDevs := TStringList.Create;
+  try
+    if FindFirst('/dev/video*', faAnyFile, SR) = 0 then
+    begin
+      repeat
+        rawDevs.Add('/dev/' + SR.Name);
+      until FindNext(SR) <> 0;
+      FindClose(SR);
+    end;
+    rawDevs.Sort;
+
+    for i := 0 to rawDevs.Count - 1 do
+    begin
+      devpath := rawDevs[i];
       fd := V4L2_Open(devpath);
       if fd >= 0 then
       begin
         if V4L2_QueryCap(fd, cap) then
         begin
-          // UVC cameras expose a second /dev/videoN metadata node that rejects
-          // XU ioctls with ENOTTY; only list nodes that can capture video.
           if (cap.capabilities and V4L2_CAP_DEVICE_CAPS) <> 0 then
             caps := cap.device_caps
           else
             caps := cap.capabilities;
-          if (caps and V4L2_CAP_VIDEO_CAPTURE) = 0 then
+
+          // Only enumerate actual video capture devices (skip metadata/vbi nodes)
+          if (caps and V4L2_CAP_VIDEO_CAPTURE) <> 0 then
           begin
-            V4L2_Close(fd);
-            Continue;
-          end;
-          if Count <= High(Devices) then
-          begin
-            Devices[Count] := Format('%s  [%s - %s]',
-              [devpath, PAnsiChar(@cap.card[0]), PAnsiChar(@cap.driver[0])]);
-            Inc(Count);
+            if Count <= High(Devices) then
+            begin
+              Devices[Count] := Format('%s  [%s - %s]',
+                [devpath, PAnsiChar(@cap.card[0]), PAnsiChar(@cap.driver[0])]);
+              Inc(Count);
+            end;
           end;
         end;
         V4L2_Close(fd);
       end;
-    until FindNext(SR) <> 0;
-    FindClose(SR);
+    end;
+  finally
+    rawDevs.Free;
   end;
 end;
 
