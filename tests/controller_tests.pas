@@ -58,11 +58,22 @@ begin
     Check(C.SetCameraMode(cmOverhead),'enter overhead');
     CurrentTilt:=-300000;
     Check(C.SetCameraMode(cmNormal),'leave overhead');
-    Check(CurrentTilt=0,'Normal recenters after overhead');
+    Check(CurrentTilt=-300000,'Normal changes mode without moving or resetting');
     Check(C.SetCameraMode(cmDeskView),'enter DeskView');
     CurrentTilt:=-300000;
     Check(C.SetCameraMode(cmNormal),'leave DeskView');
-    Check(CurrentTilt=0,'Normal recenters after DeskView');
+    Check(CurrentTilt=-300000,'Normal does not reset DeskView position');
+    Check(C.SetAITracking(True),'enable tracking before Home');
+    Before:=ResetWrites;
+    Check(C.MoveHome,'Home moves to center');
+    Check((CurrentPan=0) and (CurrentTilt=0) and (ResetWrites=Before),
+      'Home centers without hardware reset');
+    Check(C.AITrackingEnabled and (LastMode=XU_MODE_AI_TRACKING),
+      'Home preserves tracking');
+    Before:=ModeWrites;
+    Check(C.PanTiltRelative(1,1),'manual move while tracking');
+    Check(C.RecallPreset(0),'preset while tracking');
+    Check((ModeWrites=Before) and C.AITrackingEnabled,'movement and preset do not change modes');
     CurrentPan:=0; CurrentTilt:=0;
     Check(C.PanTiltRelative(1,1),'relative move');
     Check((CurrentPan=3600) and (CurrentTilt=3600),'degree-sized movement restored');

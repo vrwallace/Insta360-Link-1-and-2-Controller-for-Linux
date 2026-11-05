@@ -379,22 +379,19 @@ restoring the October 31 workaround for unreliable position reads. Tracking or
 movement outside this app may not be reflected in those saved coordinates.
 Zoom read failure prevents saving. Other models use checked position reads.
 
-The October 31 controls are restored: manual moves use degrees times 3600,
-left/right follow the original mapping, tracking is disabled before manual
-movement, and manual downward tilt is limited to -252000 (-70 degrees) to
-avoid the privacy parking position. This limit applies to manual relative
-moves; it does not override firmware-driven DeskView/Overhead movement.
-Home/Gimbal Reset always send an absolute center command after the XU reset.
-Normal recenters when leaving DeskView or Overhead.
+Manual moves use degrees times 3600 and the original left/right mapping.
+Manual downward tilt is limited to -252000 (-70 degrees) to avoid the privacy
+parking position. This limit does not override firmware-driven DeskView/Overhead
+movement. Home sends only absolute pan/tilt center commands. Manual movement,
+Home, and preset recall preserve tracking and do not reset the camera. Mode
+buttons send the requested mode without resetting or recentering. Only the
+explicit Gimbal Reset button exits special mode, resets, and centers the gimbal.
 
-Preview uses the original 30ms polling, reusable JPEG decoder, startup cleanup,
-and automatic restart after mode changes/reset. A stalled stream schedules recovery after
-about two seconds. Mode changes and resets schedule a delayed restart, with up
-to five attempts on a separate timer even if capture fails to start. A received
-frame completes recovery; Stop Preview cancels it. Home/reset can start
-a stopped preview. Temporary dequeue EIO is retried; device removal remains a
-terminal error. Bounded dequeue and frame validation remain enabled. The GUI
-preview ABI is explicitly restricted to x86-64 Linux.
+Preview uses 30ms polling, a reusable JPEG decoder, and startup cleanup.
+Control buttons and stalled-frame polling never stop or restart preview.
+Home and Gimbal Reset also leave a stopped preview stopped. Temporary dequeue
+EIO is retried; device removal remains a terminal error. Bounded dequeue and
+frame validation remain enabled. The GUI preview ABI is restricted to x86-64 Linux.
 
 Run the hardware-independent regression suite with:
 
@@ -402,9 +399,9 @@ Run the hardware-independent regression suite with:
 make test
 ```
 
-It requires Python 3, FPC, Lazarus, and the LCL `nogui` widgetset. Tests build in a
+It requires Python 3, FPC, Lazarus, Xvfb (`xvfb-run`), and the LCL `nogui` and `gtk2` widgetsets. Tests build in a
 temporary directory, use fake ioctl responses and mapped temporary files, and
 never open a video device. They cover CLI validation/status, controller failure
 paths, preset merging/concurrent writers, bounded preview and error handling,
-and cleanup. `make clean` removes the GUI/CLI executables and generated unit
+GUI control isolation (tracking, reset, and stream commands), and cleanup. `make clean` removes the GUI/CLI executables and generated unit
 files while preserving source and resources.

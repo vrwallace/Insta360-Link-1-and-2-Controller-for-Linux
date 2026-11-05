@@ -65,9 +65,6 @@ with tempfile.TemporaryDirectory(prefix='pro3-tests-') as td:
     assert all(writer.wait() == 0 for writer in writers)
     run(['./settings_writer', 'check'], work, env)
     print('PASS: concurrent preset writers retain both slots')
-    shutil.copy2(ROOT / 'tests/preview_retry_tests.pas', work)
-    run(['fpc', '-B', 'preview_retry_tests.pas'], work, env)
-    print(run(['./preview_retry_tests'], work, env).stdout, end='')
     shutil.copy2(ROOT / 'tests/preview_tests.lpr', work)
     (work / 'preview_tests.lpi').write_text("""<?xml version="1.0"?>
 <CONFIG><ProjectOptions><Version Value="12"/><RequiredPackages>
@@ -80,6 +77,12 @@ with tempfile.TemporaryDirectory(prefix='pro3-tests-') as td:
 </CompilerOptions></CONFIG>""")
     run(['lazbuild', '--widgetset=nogui', 'preview_tests.lpi'], work, env)
     print(run(['./preview_tests'], work, env).stdout, end='')
+    shutil.copy2(ROOT / 'tests/gui_controls_tests.lpr', work)
+    shutil.copy2(ROOT / 'umainform.lfm', work)
+    project = (work / 'preview_tests.lpi').read_text()
+    (work / 'gui_controls_tests.lpi').write_text(project.replace('preview_tests', 'gui_controls_tests').replace('preview-units', 'gui-units'))
+    run(['lazbuild', '--widgetset=gtk2', 'gui_controls_tests.lpi'], work, env)
+    print(run(['xvfb-run', '-a', './gui_controls_tests'], work, env).stdout, end='')
     clean_root = work / 'clean-project'
     (clean_root / 'scripts').mkdir(parents=True)
     (clean_root / 'lib/x86_64-linux/gtk2').mkdir(parents=True)

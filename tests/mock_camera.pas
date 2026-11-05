@@ -5,6 +5,7 @@ uses SysUtils, BaseUnix, uv4l2;
 var FailPan, FailTilt, FailZoom, FailRead, FailMode: Boolean;
     CurrentPan, CurrentTilt, CurrentZoom: LongInt;
     Writes: Integer;
+    ModeWrites: Integer;
     ResetAccepted: Boolean;
     ResetWrites: Integer;
     ModeLength: Word = 52;
@@ -68,7 +69,7 @@ begin
         FillChar(U^.data^, U^.size, 0); PByte(U^.data)^:=6; Exit(0);
       end;
       if U^.query = UVC_SET_CUR then
-      begin Inc(Writes); if not FailMode then begin LastMode:=PByte(U^.data)^; Exit(0); end; end;
+      begin Inc(Writes); Inc(ModeWrites); if not FailMode then begin LastMode:=PByte(U^.data)^; Exit(0); end; end;
     end;
   end;
 end;

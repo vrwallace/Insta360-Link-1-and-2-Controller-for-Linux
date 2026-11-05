@@ -20,11 +20,15 @@ interface
 uses
   Classes, SysUtils, BaseUnix, Forms, Controls, Graphics, Dialogs, StdCtrls,
   ExtCtrls, ComCtrls, Spin, Buttons, IniFiles, uv4l2, uinsta360link,
-  uvideocap, ulinksettings, upreviewretry;
+  uvideocap, ulinksettings;
 
 type
   { TfrmMain }
   TfrmMain = class(TForm)
+    {$IFDEF CAMERA_TEST}
+    procedure TestConnect(const DevicePath: string);
+    procedure TestControl(const ControlName: string);
+    {$ENDIF}
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure FormClose(Sender: TObject; var CloseAction: TCloseAction);
@@ -44,8 +48,6 @@ type
     lblPreviewInfo: TLabel;
     tmrPreview: TTimer;
     FStallCount: Integer;
-    FPreviewRetry: TPreviewRetry;
-    tmrPreviewRecovery: TTimer;
 
     // --- Press-and-hold PTZ ---
     tmrPTZ: TTimer;
@@ -164,8 +166,6 @@ type
     procedure PreviewTimer(Sender: TObject);
     procedure StartPreview;
     procedure StopPreview;
-    procedure RestartPreview;
-    procedure PreviewRecoveryTimer(Sender: TObject);
 
     // Mode handlers
     procedure TrackingOnClick(Sender: TObject);
@@ -211,6 +211,40 @@ implementation
 
 {$R *.lfm}
 
+{$IFDEF CAMERA_TEST}
+procedure TfrmMain.TestConnect(const DevicePath: string);
+var P: TPresetPosition;
+begin
+  FCam.XU_UnitID := 4;
+  cboDevice.Items.Clear;
+  cboDevice.Items.Add(DevicePath + '  [mock camera]');
+  cboDevice.ItemIndex := 0;
+  ConnectClick(Self);
+  P.Name := 'test'; P.Valid := True; P.Pan := 123; P.Tilt := 456; P.Zoom := 100;
+  FCam.SetPreset(0, P);
+  Include(FPresetDirty, 0); // avoid disk reload during this isolated test
+end;
+
+procedure TfrmMain.TestControl(const ControlName: string);
+begin
+  case ControlName of
+    'home': HomeClick(btnHome);
+    'reset': GimbalResetClick(btnGimbalReset);
+    'tracking': TrackingOnClick(btnTrackingOn);
+    'normal': ModeButtonClick(btnNormal);
+    'overhead': ModeButtonClick(btnOverhead);
+    'deskview': ModeButtonClick(btnDeskView);
+    'preset': PresetRecallClick(btnPresetRecall[0]);
+    'left': begin
+      PTZMouseDown(btnLeft, mbLeft, [], 0, 0);
+      PTZMouseUp(btnLeft, mbLeft, [], 0, 0);
+    end;
+    'tick': PreviewTimer(tmrPreview);
+    'preview': PreviewToggleClick(btnPreview);
+  end;
+end;
+{$ENDIF}
+
 { ===== Form lifecycle ===== }
 
 procedure TfrmMain.FormCreate(Sender: TObject);
@@ -219,10 +253,11 @@ begin
   FCam.OnLog := @CamLog;
   FUpdating := False;
   FCapture := TVideoCapture.Create;
-  FPreviewRetry := TPreviewRetry.Create;
   FPreviewBmp := TBitmap.Create;
   BuildUI;
+  {$IFNDEF CAMERA_TEST}
   RefreshDeviceList;
+  {$ENDIF}
   LoadSettings;
   UpdateUIState;
 end;
@@ -230,7 +265,6 @@ end;
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
   StopPreview;
-  FPreviewRetry.Free;
   FCapture.Free;
   FPreviewBmp.Free;
   FCam.Free;
@@ -592,10 +626,6 @@ begin
   tmrPreview.Interval := 30; // restored ~33 fps poll
   tmrPreview.Enabled := False;
   tmrPreview.OnTimer := @PreviewTimer;
-  tmrPreviewRecovery := TTimer.Create(Self);
-  tmrPreviewRecovery.Interval := 200;
-  tmrPreviewRecovery.Enabled := False;
-  tmrPreviewRecovery.OnTimer := @PreviewRecoveryTimer;
 
   // === RIGHT: Presets + Log ===
   pnlRight := TPanel.Create(Self);
@@ -719,23 +749,6 @@ var
 begin
   if not FCam.Connected then Exit;
 
-  // Auto-disable tracking when manually moving gimbal to avoid fighting motor controls
-  // or triggering the camera's 10-second lost-target sleep timer
-  if FCam.AITrackingEnabled or FCam.GetAITracking then
-  begin
-    if not FCam.SetAITracking(False) then Exit;
-    btnTrackingOn.Font.Style := [];
-    btnTrackingOn.Caption := 'ON';
-    btnTrackingOff.Font.Style := [];
-    btnTrackingOff.Caption := 'OFF';
-  end;
-
-  if FCam.CurrentMode in [cmDeskView, cmOverhead, cmWhiteboard] then
-  begin
-    if not FCam.SetCameraMode(cmNormal) then Exit;
-    RestartPreview;
-  end;
-
   dirTag := (Sender as TSpeedButton).Tag;
   panDir := (dirTag shr 4) and $F;
   tiltDir := dirTag and $F;
@@ -780,8 +793,7 @@ begin
   if not FCam.Connected then Exit;
   tmrPTZ.Enabled := False;
   FPTZPanStep := 0; FPTZTiltStep := 0;
-  FCam.GimbalReset;
-  if FCapture.Streaming then RestartPreview else StartPreview;
+  FCam.MoveHome;
 end;
 
 procedure TfrmMain.ZoomChange(Sender: TObject);
@@ -813,14 +825,11 @@ begin
   else
   begin
     CamLog(Self, 'Preview FAILED to start: ' + FCapture.LastError);
-    if FCapture.LastErrorCode <> ESysENODEV then RestartPreview;
   end;
 end;
 
 procedure TfrmMain.StopPreview;
 begin
-  tmrPreviewRecovery.Enabled := False;
-  FPreviewRetry.Cancel;
   tmrPreview.Enabled := False;
   if FCapture.Streaming then
   begin
@@ -835,46 +844,10 @@ end;
 
 procedure TfrmMain.PreviewToggleClick(Sender: TObject);
 begin
-  if FCapture.Streaming or FPreviewRetry.Active then
+  if FCapture.Streaming then
     StopPreview
   else
     StartPreview;
-end;
-
-procedure TfrmMain.RestartPreview;
-begin
-  if not FCam.Connected then Exit;
-  tmrPreview.Enabled := False;
-  FCapture.Stop;
-  FStallCount := 0;
-  FPreviewRetry.BeginRecovery(GetTickCount64);
-  tmrPreviewRecovery.Enabled := True;
-  btnPreview.Caption := 'Stop Preview';
-  lblPreviewInfo.Caption := 'Waiting for camera; restarting preview...';
-end;
-
-procedure TfrmMain.PreviewRecoveryTimer(Sender: TObject);
-begin
-  if not FCam.Connected then
-  begin
-    StopPreview;
-    Exit;
-  end;
-  if FPreviewRetry.Due(GetTickCount64) then
-  begin
-    // Independent of capture/preview timer: failed starts must keep retrying.
-    tmrPreview.Enabled := False;
-    FCapture.Stop;
-    CamLog(Self, Format('Preview recovery attempt %d', [FPreviewRetry.Attempts]));
-    StartPreview;
-    // A successful STREAMON is not recovery until a frame actually arrives.
-  end;
-  if not FPreviewRetry.Active then
-  begin
-    StopPreview;
-    lblPreviewInfo.Caption := 'Preview could not recover; use Start Preview to retry';
-    CamLog(Self, 'Preview recovery stopped after five attempts');
-  end;
 end;
 
 procedure TfrmMain.PreviewTimer(Sender: TObject);
@@ -882,29 +855,25 @@ begin
   if not FCapture.Streaming then Exit;
   if FCapture.GrabFrame(FPreviewBmp) then
   begin
+    if FStallCount >= 65 then
+      lblPreviewInfo.Caption := Format('%dx%d %s',
+        [FCapture.Width, FCapture.Height, FourCCToStr(FCapture.PixFmt)]);
     FStallCount := 0;
-    FPreviewRetry.Cancel;
-    tmrPreviewRecovery.Enabled := False;
     imgPreview.Picture.Bitmap.Assign(FPreviewBmp);
     imgPreview.Invalidate;
   end
-  else Inc(FStallCount);
+  else if FStallCount < 65 then Inc(FStallCount);
   if FCapture.LastError <> '' then
   begin
     CamLog(Self, FCapture.LastError);
-    if FCapture.LastErrorCode = ESysENODEV then
-    begin
-      StopPreview;
-      lblPreviewInfo.Caption := 'Camera disconnected';
-    end
-    else RestartPreview;
+    tmrPreview.Enabled := False;
+    btnPreview.Caption := 'Start Preview';
+    lblPreviewInfo.Caption := FCapture.LastError;
     Exit;
   end;
-  if FStallCount >= 65 then
-  begin
-    CamLog(Self, 'Preview stalled; scheduling stream recovery');
-    RestartPreview;
-  end;
+  if FStallCount = 65 then
+    lblPreviewInfo.Caption := 'Waiting for camera frames';
+  // Leave streaming/tracking alone; only the preview button may restart it.
 end;
 
 { ===== Mode Handlers ===== }
@@ -913,7 +882,6 @@ procedure TfrmMain.TrackingOnClick(Sender: TObject);
 begin
   if not FCam.Connected then Exit;
   if not FCam.SetAITracking(True) then Exit;
-  if FCapture.Streaming or FPreviewRetry.Active then RestartPreview;
   // Sync framing combo with camera's current state without triggering event
   FUpdating := True;
   try
@@ -966,26 +934,22 @@ begin
 end;
 
 procedure TfrmMain.ModeButtonClick(Sender: TObject);
-var
-  wasStreaming: Boolean;
 begin
   if not FCam.Connected then Exit;
-  wasStreaming := FCapture.Streaming or FPreviewRetry.Active;
   case (Sender as TButton).Tag of
     0: FCam.SetCameraMode(cmNormal);
     1: FCam.SetCameraMode(cmDeskView);
     2: FCam.SetCameraMode(cmWhiteboard);
     3: FCam.SetCameraMode(cmOverhead);
   end;
-  if wasStreaming then
-    RestartPreview
-  else if (Sender as TButton).Tag = 0 then
-    StartPreview;
 end;
 
 procedure TfrmMain.GimbalResetClick(Sender: TObject);
 begin
-  HomeClick(Sender);
+  if not FCam.Connected then Exit;
+  tmrPTZ.Enabled := False;
+  FPTZPanStep := 0; FPTZTiltStep := 0;
+  FCam.GimbalReset;
 end;
 
 { ===== Image Handlers ===== }
@@ -1066,7 +1030,6 @@ begin
   p := FCam.GetPreset((Sender as TButton).Tag);
   if not FCam.RecallPreset((Sender as TButton).Tag) then Exit;
 
-  if FCapture.Streaming or FPreviewRetry.Active then RestartPreview;
 
   // Recall changes the camera directly, so mirror the recalled zoom in the UI
   // without firing ZoomChange and sending the same command a second time.

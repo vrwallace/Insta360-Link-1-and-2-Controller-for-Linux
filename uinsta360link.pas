@@ -179,6 +179,7 @@ type
     function GetZoom: LongInt;
 
     { Reset gimbal to center position }
+    function MoveHome: Boolean;
     function GimbalReset: Boolean;
 
     { ===== AI Tracking ===== }
@@ -780,7 +781,6 @@ function TInsta360Link.SetPanAbsolute(Value: LongInt): Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
-  if not LeaveSpecialMode then Exit;
 
   // Ensure tilt position is current before combined call
   GetTiltAbsolute;
@@ -812,7 +812,6 @@ function TInsta360Link.SetTiltAbsolute(Value: LongInt): Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
-  if not LeaveSpecialMode then Exit;
 
   // Ensure pan position is current before combined call
   GetPanAbsolute;
@@ -879,7 +878,6 @@ var
 begin
   Result := False;
   if not FConnected then Exit;
-  if not LeaveSpecialMode then Exit;
   GetPanAbsolute;
   GetTiltAbsolute;
   // Restore degrees, not the device's minimum control increment.
@@ -917,6 +915,13 @@ begin
   Result := 100;
   if FConnected then
     V4L2_GetCtrl(FFD, V4L2_CID_ZOOM_ABSOLUTE, Result);
+end;
+
+function TInsta360Link.MoveHome: Boolean;
+begin
+  // Home is a position command only. Preserve mode, tracking, zoom and stream.
+  Result := ApplyPanTilt(0, 0);
+  if Result then Log('Home: centered') else Log('Home movement FAILED');
 end;
 
 function TInsta360Link.GimbalReset: Boolean;
@@ -1105,34 +1110,25 @@ end;
 { ===== Special Modes ===== }
 
 function TInsta360Link.SetCameraMode(Mode: TCameraMode): Boolean;
-var OffOK: Boolean;
 begin
   Result := False;
   if not FConnected then Exit;
-
-  OffOK := XU_SetMode(XU_MODE_OFF, 0);
-  if OffOK then
-  begin
-    FAITrackingEnabled := False;
-    FCurrentMode := cmNormal;
-  end
-  else Log('Mode-off command failed');
-
+  // Send only the requested mode. Do not reset the gimbal or cycle modes first.
   case Mode of
     cmNormal:
       begin
-        Result := OffOK;
-        // Preserve upstream Normal behavior: always return to center.
-        if not GimbalReset then Result := False;
-        if Result then Log('Mode: Normal');
+        Result := XU_SetMode(XU_MODE_OFF, 0);
+        if Result then
+        begin
+          FCurrentMode := cmNormal;
+          FAITrackingEnabled := False;
+          Log('Mode: Normal');
+        end;
       end;
-    cmDeskView:   Result := SetDeskView(True);
+    cmDeskView: Result := SetDeskView(True);
     cmWhiteboard: Result := SetWhiteboard(True);
-    cmOverhead:   Result := SetOverhead(True);
+    cmOverhead: Result := SetOverhead(True);
   end;
-
-  if Result then
-    FCurrentMode := Mode;
 end;
 
 function TInsta360Link.SetDeskView(Enable: Boolean): Boolean;
@@ -1351,7 +1347,6 @@ var
 begin
   Result := False;
   if not FConnected then Exit;
-  if not LeaveSpecialMode then Exit;
   if Index > 5 then Exit;
   if not FPresets[Index].Valid then
   begin

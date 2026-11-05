@@ -16,7 +16,7 @@
     tilt <value>     Set absolute tilt (-36000..36000)
     move <px> <ty>   Relative pan/tilt (-30..30 each)
     zoom <value>     Set zoom (100=1x to 400=4x)
-    home             Reset gimbal to center
+    home             Move pan/tilt to center
     tracking on|off  Enable/disable AI tracking
     frame head|half|full  Set tracking framing mode
     deskview on|off  Toggle DeskView mode
@@ -93,7 +93,7 @@ begin
   WriteLn('  tilt <value>        Set absolute tilt');
   WriteLn('  move <px> <ty>      Relative pan/tilt');
   WriteLn('  zoom <value>        Set zoom (100=1x to 400=4x)');
-  WriteLn('  home                Reset gimbal to center');
+  WriteLn('  home                Move pan/tilt to center');
   WriteLn;
   WriteLn('AI & Mode Commands:');
   WriteLn('  tracking on|off     AI tracking');
@@ -505,7 +505,7 @@ begin
     else if cmd = 'zoom' then
       ok := Cam.SetZoom(StrToIntDef(ParamStr(argIdx), 100))
     else if cmd = 'home' then
-      ok := Cam.GimbalReset
+      ok := Cam.MoveHome
 
     // ===== AI & Modes =====
     else if cmd = 'tracking' then
